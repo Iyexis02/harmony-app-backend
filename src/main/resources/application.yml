@@ -1,0 +1,58 @@
+spring:
+  datasource:
+    url: jdbc:postgresql://127.0.0.1:5433/dating
+    username: root
+    password: secret
+    driver-class-name: org.postgresql.Driver
+  jpa:
+    hibernate:
+      ddl-auto: update
+    show-sql: true
+    properties:
+      hibernate:
+        format_sql: true
+    database: postgresql
+    database-platform: org.hibernate.dialect.PostgreSQLDialect
+  mail:
+    from: ${MAIL_FROM:noreply@datingapp.com}
+
+sendgrid:
+  api-key: ${SENDGRID_API_KEY}
+
+encryption:
+  secret:
+    key: ${ENCRYPTION_SECRET_KEY:xhnXQGxzJn/nCBAfZfPrvafxfrmAKDTZeL5r+gJ+q70=}
+
+geocoding:
+  provider: google                # Which provider to use (google or nominatim)
+
+  google:
+    api-key: ${GOOGLE_MAPS_API_KEY}  # Read from environment variable
+    base-url: https://maps.googleapis.com/maps/api/geocode/json
+
+  nominatim:
+    base-url: https://nominatim.openstreetmap.org/search
+    user-agent: MyDatingApp/1.0
+
+  autoconfigure:
+    exclude:
+      - org.springframework.ai.vectorstore.pgvector.autoconfigure.PgVectorStoreAutoConfiguration
+
+spotify:
+  client:
+    id: ${SPOTIFY_CLIENT_ID}
+    secret: ${SPOTIFY_CLIENT_SECRET}
+
+jwt:
+  secret:
+    key: ${JWT_SECRET_KEY}
+  expiration:
+    hours: 24
+
+app:
+  frontend:
+    url: ${FRONTEND_URL:http://localhost:3000}
+  verification:
+    token-expiry-hours: 24
+  password-reset:
+    token-expiry-hours: 1

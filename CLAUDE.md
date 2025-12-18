@@ -1,0 +1,1 @@
+- Before each first prompt of the session,  read CLAUDE_COMMANDS.md and follow its rules
