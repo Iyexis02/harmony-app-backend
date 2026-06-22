@@ -68,7 +68,7 @@ geocoding:
   provider: ${GEOCODING_PROVIDER:google}   # Which provider to use (google or nominatim)
 
   google:
-    api-key: ${GOOGLE_MAPS_API_KEY}  # Read from environment variable
+    api-key: ${GOOGLE_MAPS_API_KEY:}  # Empty default so nominatim-only deploys boot without a Google key
     base-url: https://maps.googleapis.com/maps/api/geocode/json
 
   nominatim:
