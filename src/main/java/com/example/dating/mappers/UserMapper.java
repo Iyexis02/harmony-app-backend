@@ -2,10 +2,18 @@ package com.example.dating.mappers;
 
 import com.example.dating.models.user.common.dao.UserEntity;
 import com.example.dating.models.user.domain.User;
+import com.example.dating.models.user.dto.UserProfileResponseDto;
+import com.example.dating.models.user.lifestyle.dao.UserLifestyle;
+import com.example.dating.models.user.personality.dao.UserPersonality;
+import com.example.dating.models.user.photos.dao.UserPhoto;
+import com.example.dating.models.user.privacy.dao.UserPrivacySettings;
 
 import com.example.dating.models.user.common.dto.UserDtoRequest;
 import com.example.dating.models.user.common.dto.UserDtoResponse;
 import org.springframework.stereotype.Component;
+
+import java.util.Comparator;
+import java.util.List;
 
 @Component
 public class UserMapper {
@@ -35,6 +43,12 @@ public class UserMapper {
                 .emailVerificationExpires(entity.getEmailVerificationExpires())
                 .passwordResetToken(entity.getPasswordResetToken())
                 .passwordResetExpires(entity.getPasswordResetExpires())
+                .emailVerificationTokenHash(entity.getEmailVerificationTokenHash())
+                .passwordResetTokenHash(entity.getPasswordResetTokenHash())
+                .tokenVersion(entity.getTokenVersion())
+                // Batch E: lockout
+                .failedLoginAttempts(entity.getFailedLoginAttempts())
+                .lockedUntil(entity.getLockedUntil())
                 // Spotify
                 .spotifyId(entity.getSpotifyId())
                 .spotifyAccessToken(entity.getSpotifyAccessToken())
@@ -74,6 +88,13 @@ public class UserMapper {
             existingEntity.setEmailVerificationExpires(domain.getEmailVerificationExpires());
             existingEntity.setPasswordResetToken(domain.getPasswordResetToken());
             existingEntity.setPasswordResetExpires(domain.getPasswordResetExpires());
+            existingEntity.setEmailVerificationTokenHash(domain.getEmailVerificationTokenHash());
+            existingEntity.setPasswordResetTokenHash(domain.getPasswordResetTokenHash());
+            existingEntity.setTokenVersion(domain.getTokenVersion());
+            // Batch E: lockout
+            existingEntity.setFailedLoginAttempts(
+                    domain.getFailedLoginAttempts() != null ? domain.getFailedLoginAttempts() : 0);
+            existingEntity.setLockedUntil(domain.getLockedUntil());
             // Spotify
             existingEntity.setSpotifyId(domain.getSpotifyId());
             existingEntity.setSpotifyAccessToken(domain.getSpotifyAccessToken());
@@ -106,6 +127,12 @@ public class UserMapper {
                 .emailVerificationExpires(domain.getEmailVerificationExpires())
                 .passwordResetToken(domain.getPasswordResetToken())
                 .passwordResetExpires(domain.getPasswordResetExpires())
+                .emailVerificationTokenHash(domain.getEmailVerificationTokenHash())
+                .passwordResetTokenHash(domain.getPasswordResetTokenHash())
+                .tokenVersion(domain.getTokenVersion() != null ? domain.getTokenVersion() : 0)
+                // Batch E: lockout
+                .failedLoginAttempts(domain.getFailedLoginAttempts() != null ? domain.getFailedLoginAttempts() : 0)
+                .lockedUntil(domain.getLockedUntil())
                 // Spotify
                 .spotifyId(domain.getSpotifyId())
                 .spotifyAccessToken(domain.getSpotifyAccessToken())
@@ -151,6 +178,58 @@ public class UserMapper {
                 .gender(user.getGender())
                 .dateOfBirth(user.getDateOfBirth())
                 .build();
+    }
+
+    /**
+     * Maps a UserEntity to the public profile DTO, applying field-level privacy gating.
+     *
+     * @param entity  the target user's entity (with lazy associations available via open-in-view)
+     * @param isOwner true when the requester is the profile owner — bypasses all privacy flags
+     */
+    public UserProfileResponseDto toUserProfileResponse(UserEntity entity, boolean isOwner) {
+        UserPrivacySettings privacy = entity.getPrivacySettings();
+        boolean showAge = isOwner || privacy == null || Boolean.TRUE.equals(privacy.getShowAge());
+
+        // Photos sorted by displayOrder ascending
+        List<String> photoUrls = List.of();
+        if (entity.getPhotos() != null && !entity.getPhotos().isEmpty()) {
+            photoUrls = entity.getPhotos().stream()
+                    .sorted(Comparator.comparingInt(p -> p.getDisplayOrder() != null ? p.getDisplayOrder() : 99))
+                    .map(UserPhoto::getImageUrl)
+                    .toList();
+        }
+
+        UserProfileResponseDto.UserProfileResponseDtoBuilder builder = UserProfileResponseDto.builder()
+                .userId(entity.getId())
+                .name(entity.getName())
+                .age(showAge ? entity.getAge() : null)
+                .gender(entity.getGender())
+                .locationCity(entity.getLocationCity())
+                .locationCountry(entity.getLocationCountry())
+                .photos(photoUrls);
+
+        UserPersonality personality = entity.getPersonality();
+        if (personality != null) {
+            builder.bio(personality.getBio())
+                   .interests(personality.getInterests())
+                   .mbti(personality.getMbti())
+                   .lookingForText(personality.getLookingForText())
+                   .favoriteQuote(personality.getFavoriteQuote())
+                   .conversationStarters(personality.getConversationStarters());
+        }
+
+        UserLifestyle lifestyle = entity.getLifestyle();
+        if (lifestyle != null) {
+            builder.education(lifestyle.getEducation())
+                   .occupation(lifestyle.getOccupation())
+                   .smokingHabits(lifestyle.getSmokingHabits())
+                   .drinkingHabits(lifestyle.getDrinkingHabits())
+                   .exerciseFrequency(lifestyle.getExerciseFrequency())
+                   .wantsKids(lifestyle.getWantsKids())
+                   .religion(lifestyle.getReligion());
+        }
+
+        return builder.build();
     }
 
     public UserDtoResponse toDtoRequest(User user) {

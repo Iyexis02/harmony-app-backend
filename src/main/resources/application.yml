@@ -1,30 +1,70 @@
+server:
+  forward-headers-strategy: framework
+  tomcat:
+    threads:
+      max: 200
+      min-spare: 20
+    accept-count: 100
+
 spring:
+  devtools:
+    restart:
+      # Wait 1s after a class change before restarting, and require 2s of stillness.
+      # Prevents restart while IntelliJ is mid-recompile (which leaves an inconsistent
+      # classpath and surfaces as ClassNotFoundException / missing-bean errors).
+      poll-interval: 2s
+      quiet-period: 1s
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
+      # Lettuce connections are lazy — the app starts even when Redis is unreachable.
+      # RedisRateLimiter fails open (allows requests) if Redis is down.
+    repositories:
+      enabled: false   # prevent Spring Data from scanning for @RedisHash entities
   datasource:
     url: jdbc:postgresql://127.0.0.1:5433/dating
-    username: root
-    password: secret
+    username: ${DB_USERNAME:root}
+    password: ${DB_PASSWORD:secret}
     driver-class-name: org.postgresql.Driver
+    hikari:
+      maximum-pool-size: 30
+      minimum-idle: 10
+      idle-timeout: 300000
+      connection-timeout: 5000
+      max-lifetime: 1800000
+      leak-detection-threshold: 30000
   jpa:
     hibernate:
-      ddl-auto: update
-    show-sql: true
+      ddl-auto: validate
+    show-sql: false
     properties:
       hibernate:
-        format_sql: true
+        format_sql: false
+        default_batch_fetch_size: 50
     database: postgresql
     database-platform: org.hibernate.dialect.PostgreSQLDialect
-  mail:
-    from: ${MAIL_FROM:noreply@datingapp.com}
+  flyway:
+    baseline-on-migrate: true
+    baseline-version: 8
+  jackson:
+    serialization:
+      write-dates-as-timestamps: false  # Serialize Instant as ISO 8601 string ("2026-03-19T10:15:30Z")
+  task:
+    scheduling:
+      pool:
+        size: 1  # Single scheduler thread is sufficient — only one @Scheduled method currently
 
-sendgrid:
-  api-key: ${SENDGRID_API_KEY}
+resend:
+  api-key: ${RESEND_API_KEY}
+  from: ${MAIL_FROM:onboarding@resend.dev}
 
 encryption:
   secret:
-    key: ${ENCRYPTION_SECRET_KEY:xhnXQGxzJn/nCBAfZfPrvafxfrmAKDTZeL5r+gJ+q70=}
+    key: ${ENCRYPTION_SECRET_KEY}
 
 geocoding:
-  provider: google                # Which provider to use (google or nominatim)
+  provider: google                   # Which provider to use (google or nominatim)
 
   google:
     api-key: ${GOOGLE_MAPS_API_KEY}  # Read from environment variable
@@ -56,3 +96,67 @@ app:
     token-expiry-hours: 24
   password-reset:
     token-expiry-hours: 1
+
+# Schema management: Flyway is authoritative. ddl-auto: validate ensures code matches DB.
+# To add a schema change: create a new V{N}__Description.sql migration file.
+# NEVER use ddl-auto: update in any profile.
+
+management:
+  endpoints:
+    web:
+      exposure:
+        # health: load-balancer/K8s probes; info: build metadata; metrics: Micrometer;
+        # prometheus: scrape endpoint (requires micrometer-registry-prometheus when added)
+        include: health,info,metrics,prometheus
+  endpoint:
+    health:
+      # Authenticated users see component details (DB, Redis); anonymous see status only.
+      show-details: when_authorized
+      probes:
+        # Enables /actuator/health/liveness and /actuator/health/readiness for K8s probes.
+        enabled: true
+  health:
+    db:
+      enabled: true
+    redis:
+      # Redis is OPTIONAL by design: RedisRateLimiter fails open and CaffeineRateLimiter
+      # is the in-process fallback. With this indicator enabled, a missing Redis flips the
+      # aggregate /actuator/health to 503 DOWN and a load balancer would pull a perfectly
+      # healthy node. Re-enable only if Redis ever becomes a hard dependency.
+      enabled: false
+
+# OpenAPI / Swagger UI (Batch I) — DISABLED in production for security.
+# Enabled only in the dev profile (see application-dev.yml).
+# In production, /api-docs and /swagger-ui.html return 404.
+springdoc:
+  api-docs:
+    enabled: false
+  swagger-ui:
+    enabled: false
+
+resilience4j:
+  circuitbreaker:
+    instances:
+      spotify-token:
+        sliding-window-size: 5
+        failure-rate-threshold: 60
+        wait-duration-in-open-state: 15s
+        permitted-number-of-calls-in-half-open-state: 2
+        # 401/403 = revoked token, not an API outage — must not trip the circuit
+        ignore-exceptions:
+          - com.example.dating.exceptions.SpotifyTokenRevokedException
+      spotify-data:
+        sliding-window-size: 10
+        failure-rate-threshold: 50
+        wait-duration-in-open-state: 30s
+        permitted-number-of-calls-in-half-open-state: 3
+      spotify-sync:
+        sliding-window-size: 10
+        failure-rate-threshold: 50
+        wait-duration-in-open-state: 30s
+        permitted-number-of-calls-in-half-open-state: 3
+      geocoding:
+        sliding-window-size: 5
+        failure-rate-threshold: 60
+        wait-duration-in-open-state: 60s
+        permitted-number-of-calls-in-half-open-state: 2

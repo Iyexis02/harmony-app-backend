@@ -12,19 +12,26 @@ import jakarta.persistence.*;
 import jakarta.validation.Constraint;
 import lombok.AllArgsConstructor;
 import lombok.Builder;
-import lombok.Data;
+import lombok.Getter;
 import lombok.NoArgsConstructor;
+import lombok.Setter;
+import lombok.ToString;
+import org.hibernate.annotations.BatchSize;
 import org.hibernate.validator.constraints.UniqueElements;
 
 import java.math.BigDecimal;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
+import java.time.Period;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Objects;
 
 @Entity
-@Data
+@Getter
+@Setter
+@ToString
 @Table(name = "users", indexes = {
         @Index(name = "idx_spotify_id", columnList = "spotify_id"),
         @Index(name = "idx_location", columnList = "location_lat,location_lon"),
@@ -32,7 +39,13 @@ import java.util.List;
         @Index(name = "idx_premium_status", columnList = "premium_status"),
         @Index(name = "idx_auth_provider", columnList = "auth_provider"),
         @Index(name = "idx_email_verification_token", columnList = "email_verification_token"),
-        @Index(name = "idx_password_reset_token", columnList = "password_reset_token")
+        @Index(name = "idx_password_reset_token", columnList = "password_reset_token"),
+        @Index(name = "idx_email_verification_token_hash", columnList = "email_verification_token_hash"),
+        @Index(name = "idx_password_reset_token_hash", columnList = "password_reset_token_hash"),
+        // Batch C: age-range filter in findCandidateUsers()
+        @Index(name = "idx_dob", columnList = "dob"),
+        // Batch C: gender filter (DB-side push planned in Batch D)
+        @Index(name = "idx_gender", columnList = "gender")
 })
 @Builder
 @NoArgsConstructor
@@ -43,6 +56,11 @@ public class UserEntity {
     @GeneratedValue(strategy = GenerationType.UUID)
     @Column(name = "id", length = 36, nullable = false, updatable = false)
     private String id;
+
+    @Version
+    @Column(name = "version")
+    @Builder.Default
+    private Long version = 0L;
 
     @Column(name = "email", unique = true, nullable = false, length = 255)
     private String email;
@@ -71,6 +89,19 @@ public class UserEntity {
 
     @Column(name = "password_reset_expires")
     private LocalDateTime passwordResetExpires;
+
+    // SHA-256 hashes of the tokens — used for all lookups after Batch B.
+    // The plaintext columns above are kept in the schema but are written as null for new tokens.
+    @Column(name = "email_verification_token_hash", length = 64)
+    private String emailVerificationTokenHash;
+
+    @Column(name = "password_reset_token_hash", length = 64)
+    private String passwordResetTokenHash;
+
+    // Incremented on password reset to invalidate all outstanding JWTs.
+    @Column(name = "token_version", nullable = false)
+    @Builder.Default
+    private Integer tokenVersion = 0;
 
     // Spotify Integration
     @Column(name = "spotify_id", unique = true, length = 255, nullable = true)
@@ -121,24 +152,52 @@ public class UserEntity {
     private String language;
 
     // Relationships to other entities
+    // Batch D: @BatchSize reduces 500 individual SELECTs to ~10 batched IN-clause SELECTs
+    // during findPotentialMatches() candidate scoring. Do NOT parallelize the scoring loop
+    // without revisiting connection-pool exhaustion (batch loading holds connections open).
+    @ToString.Exclude
     @OneToOne(mappedBy = "user", cascade = CascadeType.ALL, orphanRemoval = true)
     private UserMusicPreferences musicPreferences;
 
+    @ToString.Exclude
     @OneToOne(mappedBy = "user", cascade = CascadeType.ALL, orphanRemoval = true)
     private UserLifestyle lifestyle;
 
+    @ToString.Exclude
     @OneToOne(mappedBy = "user", cascade = CascadeType.ALL, orphanRemoval = true)
     private UserPersonality personality;
 
+    @ToString.Exclude
     @OneToOne(mappedBy = "user", cascade = CascadeType.ALL, orphanRemoval = true)
     private UserDatingPreferences datingPreferences;
 
+    @ToString.Exclude
     @OneToOne(mappedBy = "user", cascade = CascadeType.ALL, orphanRemoval = true)
     private UserPrivacySettings privacySettings;
 
+    @ToString.Exclude
     @OneToMany(mappedBy = "user", cascade = CascadeType.ALL, orphanRemoval = true)
+    @BatchSize(size = 50)
     @Builder.Default
     private List<UserPhoto> photos = new ArrayList<>();
+
+    // Master Batch E: Soft-delete guard used during account deletion.
+    // Set to true by deleteAccount() before cleaning up child entities so that
+    // concurrent swipes targeting this user are rejected before any FK insert.
+    // The user row is still physically deleted at the end of the deletion transaction.
+    @Column(name = "deleted", nullable = false)
+    @Builder.Default
+    private boolean deleted = false;
+
+    // Per-account login lockout fields.
+    // failedLoginAttempts is incremented on each password mismatch and reset on success.
+    // lockedUntil is set to now+15min when attempts reach 5; null means not locked.
+    @Column(name = "failed_login_attempts", nullable = false)
+    @Builder.Default
+    private Integer failedLoginAttempts = 0;
+
+    @Column(name = "locked_until")
+    private LocalDateTime lockedUntil;
 
     // Registration & Status
     @Enumerated(EnumType.STRING)
@@ -203,7 +262,7 @@ public class UserEntity {
         if (dateOfBirth == null) {
             return null;
         }
-        return LocalDate.now().getYear() - dateOfBirth.getYear();
+        return Period.between(dateOfBirth, LocalDate.now()).getYears();
     }
 
     public boolean isEmailUser() {
@@ -212,5 +271,70 @@ public class UserEntity {
 
     public boolean canConnectSpotify() {
         return isEmailUser() && spotifyId == null;
+    }
+
+    // ── Batch G: Bidirectional relationship helpers ───────────────────────────
+    // These custom setters override the Lombok-generated ones for relationship
+    // fields and sync both sides of each association so the in-memory object
+    // graph stays consistent with what JPA will actually persist (the owning side
+    // is the sub-entity, not UserEntity, because of mappedBy).
+    //
+    // WARNING: calling setXxx(null) with orphanRemoval = true will delete the
+    //          existing DB row. Only pass null when intentionally removing the
+    //          sub-entity record.
+
+    public void setMusicPreferences(UserMusicPreferences musicPreferences) {
+        this.musicPreferences = musicPreferences;
+        if (musicPreferences != null) musicPreferences.setUser(this);
+    }
+
+    public void setLifestyle(UserLifestyle lifestyle) {
+        this.lifestyle = lifestyle;
+        if (lifestyle != null) lifestyle.setUser(this);
+    }
+
+    public void setPersonality(UserPersonality personality) {
+        this.personality = personality;
+        if (personality != null) personality.setUser(this);
+    }
+
+    public void setDatingPreferences(UserDatingPreferences datingPreferences) {
+        this.datingPreferences = datingPreferences;
+        if (datingPreferences != null) datingPreferences.setUser(this);
+    }
+
+    public void setPrivacySettings(UserPrivacySettings privacySettings) {
+        this.privacySettings = privacySettings;
+        if (privacySettings != null) privacySettings.setUser(this);
+    }
+
+    /**
+     * Adds a photo and sets the back-reference on the photo.
+     * Prefer this over {@code getPhotos().add(photo)} to keep both sides in sync.
+     */
+    public void addPhoto(UserPhoto photo) {
+        photos.add(photo);
+        photo.setUser(this);
+    }
+
+    /**
+     * Removes a photo and clears its back-reference.
+     * Prefer this over {@code getPhotos().remove(photo)}.
+     */
+    public void removePhoto(UserPhoto photo) {
+        photos.remove(photo);
+        photo.setUser(null);
+    }
+
+    @Override
+    public boolean equals(Object o) {
+        if (this == o) return true;
+        if (!(o instanceof UserEntity other)) return false;
+        return id != null && Objects.equals(id, other.id);
+    }
+
+    @Override
+    public int hashCode() {
+        return id != null ? Objects.hashCode(id) : getClass().hashCode();
     }
 }

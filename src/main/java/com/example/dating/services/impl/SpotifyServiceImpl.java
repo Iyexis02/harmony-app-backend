@@ -15,10 +15,12 @@ import com.example.dating.models.user.tracks.dao.SpotifyExternalId;
 import com.example.dating.models.user.tracks.dao.SpotifyTrack;
 import com.example.dating.models.user.tracks.dto.SimplifiedTrackDto;
 import com.example.dating.models.user.tracks.dto.SpotifyTrackDto;
+import com.example.dating.exceptions.SpotifyApiException;
 import com.example.dating.services.SpotifyService;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.github.resilience4j.circuitbreaker.annotation.CircuitBreaker;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.*;
@@ -41,16 +43,16 @@ public class SpotifyServiceImpl implements SpotifyService {
 
     private final ObjectMapper objectMapper;
     private final SpotifyMapper spotifyMapper;
+    private final RestTemplate spotifyRestTemplate;
 
+    @CircuitBreaker(name = "spotify-data", fallbackMethod = "getCurrentUserProfileFallback")
     public SpotifyUserProfile getCurrentUserProfile(String accessToken) {
         try {
             String url = SPOTIFY_API_BASE_URL + "/me";
             HttpHeaders headers = createHeaders(accessToken);
             HttpEntity<String> entity = new HttpEntity<>(headers);
 
-            RestTemplate restTemplate = new RestTemplate();
-
-            ResponseEntity<String> response = restTemplate.exchange(
+            ResponseEntity<String> response = spotifyRestTemplate.exchange(
                     url,
                     HttpMethod.GET,
                     entity,
@@ -78,6 +80,7 @@ public class SpotifyServiceImpl implements SpotifyService {
     }
 
     @Override
+    @CircuitBreaker(name = "spotify-data", fallbackMethod = "getTopArtistsFallback")
     public SpotifyArtistDto getTopArtists(String accessToken, Integer limit, String time_range, Integer offset) {
         try {
 
@@ -86,9 +89,7 @@ public class SpotifyServiceImpl implements SpotifyService {
             HttpHeaders headers = createHeaders(accessToken);
             HttpEntity<String> entity = new HttpEntity<>(headers);
 
-            RestTemplate restTemplate = new RestTemplate();
-
-            ResponseEntity<String> response = restTemplate.exchange(
+            ResponseEntity<String> response = spotifyRestTemplate.exchange(
                     url,
                     HttpMethod.GET,
                     entity,
@@ -137,15 +138,14 @@ public class SpotifyServiceImpl implements SpotifyService {
     }
 
     @Override
+    @CircuitBreaker(name = "spotify-data", fallbackMethod = "getTopTracksFallback")
     public SpotifyTrackDto getTopTracks(String accessToken, Integer limit, String time_range, Integer offset) throws JsonProcessingException {
         String url = buildTopItemsUrl(limit, time_range, offset, TopItemsEndpoint.TRACKS);
 
         HttpHeaders headers = createHeaders(accessToken);
         HttpEntity<String> entity = new HttpEntity<>(headers);
 
-        RestTemplate restTemplate = new RestTemplate();
-
-        ResponseEntity<String> response = restTemplate.exchange(
+        ResponseEntity<String> response = spotifyRestTemplate.exchange(
                 url,
                 HttpMethod.GET,
                 entity,
@@ -194,21 +194,29 @@ public class SpotifyServiceImpl implements SpotifyService {
 
     @Override
     public List<String> getGenresFromTopArtists(String accessToken, Integer limit, String timeRange) throws JsonProcessingException {
-        try {
-            // Fetch top artists using existing method
-            SpotifyArtistDto artistsDto = getTopArtists(accessToken, limit, timeRange, 0);
+        SpotifyArtistDto artistsDto = getTopArtists(accessToken, limit, timeRange, 0);
+        return artistsDto.artists().stream()
+                .flatMap(artist -> artist.getGenres() != null ? artist.getGenres().stream() : new ArrayList<String>().stream())
+                .distinct()
+                .sorted()
+                .toList();
+    }
 
-            // Extract and deduplicate genres from all artists
-            return artistsDto.artists().stream()
-                    .flatMap(artist -> artist.getGenres() != null ? artist.getGenres().stream() : new ArrayList<String>().stream())
-                    .distinct()
-                    .sorted()
-                    .toList();
+    // ── Circuit breaker fallbacks ─────────────────────────────────────────────
 
-        } catch (Exception e) {
-            log.error("Error fetching genres from Spotify top artists: {}", e.getMessage());
-            return Collections.emptyList();
-        }
+    private SpotifyUserProfile getCurrentUserProfileFallback(String accessToken, Throwable t) {
+        log.warn("Spotify circuit open for getCurrentUserProfile: {}", t.getMessage());
+        throw new SpotifyApiException("Spotify service temporarily unavailable — circuit open");
+    }
+
+    private SpotifyArtistDto getTopArtistsFallback(String accessToken, Integer limit, String timeRange, Integer offset, Throwable t) {
+        log.warn("Spotify circuit open for getTopArtists: {}", t.getMessage());
+        throw new SpotifyApiException("Spotify service temporarily unavailable — circuit open");
+    }
+
+    private SpotifyTrackDto getTopTracksFallback(String accessToken, Integer limit, String timeRange, Integer offset, Throwable t) {
+        log.warn("Spotify circuit open for getTopTracks: {}", t.getMessage());
+        throw new SpotifyApiException("Spotify service temporarily unavailable — circuit open");
     }
 
     private HttpHeaders createHeaders(String accessToken) {

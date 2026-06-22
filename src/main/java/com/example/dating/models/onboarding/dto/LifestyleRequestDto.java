@@ -30,7 +30,7 @@ public class LifestyleRequestDto {
 
     private ExerciseFrequency exerciseFrequency;
 
-    private String religion;
+    private Religion religion;
 
-    private String politicalViews;
+    private PoliticalViews politicalViews;
 }

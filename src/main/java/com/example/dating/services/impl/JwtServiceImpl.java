@@ -1,9 +1,12 @@
 package com.example.dating.services.impl;
 
 
+import com.example.dating.exceptions.SpotifyApiException;
+import com.example.dating.exceptions.SpotifyTokenRevokedException;
 import com.example.dating.models.auth.SpotifyTokenResponse;
 import com.example.dating.models.user.domain.User;
 import com.example.dating.services.JwtService;
+import io.github.resilience4j.circuitbreaker.annotation.CircuitBreaker;
 import io.jsonwebtoken.Jwts;
 import io.jsonwebtoken.SignatureAlgorithm;
 import lombok.RequiredArgsConstructor;
@@ -17,10 +20,11 @@ import org.springframework.stereotype.Service;
 import org.springframework.util.LinkedMultiValueMap;
 import org.springframework.util.MultiValueMap;
 import org.springframework.web.client.HttpClientErrorException;
+import org.springframework.web.client.HttpServerErrorException;
 import org.springframework.web.client.RestTemplate;
 
 import javax.crypto.spec.SecretKeySpec;
-import java.util.Base64;
+import java.nio.charset.StandardCharsets;
 import java.util.Date;
 import java.util.HashMap;
 import java.util.Map;
@@ -33,6 +37,8 @@ import java.util.concurrent.TimeUnit;
 public class JwtServiceImpl implements JwtService {
 
     private final JwtDecoder jwtDecoder;
+    /** Singleton RestTemplate with 5 s connect / 10 s read timeout — avoids unbounded thread blocking. */
+    private final RestTemplate spotifyRestTemplate;
 
     @Value("${jwt.secret.key}")
     private String secret;
@@ -58,8 +64,6 @@ public class JwtServiceImpl implements JwtService {
             Jwt decoded = jwtDecoder.decode(jwt);
             Map<String, Object> claims = decoded.getClaims();
 
-            log.info(claims.toString());
-
             // Common places to store user id: "sub", "userId", "id"
             Object userIdObj = claims.get("userId");
             if (userIdObj == null) userIdObj = claims.get("id");
@@ -67,14 +71,10 @@ public class JwtServiceImpl implements JwtService {
 
             if (userIdObj == null) {
                 log.warn("JWT does not contain user id claim (checked userId, id, sub)");
-                return null; // or throw an application-specific exception
+                return null;
             }
 
-
-            // adapt to your DTO id type: if UUID:
-
-            // try parse as 3UUID, otherwise set as string
-
+            log.debug("JWT decoded for userId: {}", userIdObj);
             return userIdObj.toString();
 
         } catch (JwtException ex) {
@@ -85,79 +85,94 @@ public class JwtServiceImpl implements JwtService {
     }
 
     @Override
+    @CircuitBreaker(name = "spotify-token", fallbackMethod = "refreshTokenFallback")
     public SpotifyTokenResponse refreshToken(String refreshToken) {
-        try {
-            log.info("Attempting to refresh Spotify token");
-            log.debug("Using client ID: {}", spotify_client_id);
-            log.debug("Refresh token (first 10 chars): {}",
-                    refreshToken != null && refreshToken.length() > 10
-                            ? refreshToken.substring(0, 10) + "..."
-                            : "null or too short");
-            log.debug("Token URL: {}", SPOTIFY_TOKEN_URL);
+        int maxAttempts = 3;
+        long[] backoffMs = {500, 1000, 2000};
+        Exception lastException = null;
 
-            RestTemplate restTemplate = new RestTemplate();
+        for (int attempt = 1; attempt <= maxAttempts; attempt++) {
+            try {
+                log.info("Attempting to refresh Spotify token (attempt {}/{})", attempt, maxAttempts);
 
-            // Set up headers with Basic Authentication
-            HttpHeaders headers = new HttpHeaders();
-            headers.setContentType(MediaType.APPLICATION_FORM_URLENCODED);
+                HttpHeaders headers = new HttpHeaders();
+                headers.setContentType(MediaType.APPLICATION_FORM_URLENCODED);
+                headers.setBasicAuth(spotify_client_id, spotifyClientSecret);
 
-            // Log the auth header to verify it's correct (be careful in production!)
-            String authHeader = "Basic " + Base64.getEncoder()
-                    .encodeToString((spotify_client_id + ":" + spotifyClientSecret).getBytes());
-            log.debug("Auth header starts with: {}", authHeader.substring(0, 20) + "...");
+                MultiValueMap<String, String> body = new LinkedMultiValueMap<>();
+                body.add("grant_type", "refresh_token");
+                body.add("refresh_token", refreshToken.trim());
 
-            headers.setBasicAuth(spotify_client_id, spotifyClientSecret);
+                HttpEntity<MultiValueMap<String, String>> request = new HttpEntity<>(body, headers);
 
-            // Set up request body
-            MultiValueMap<String, String> body = new LinkedMultiValueMap<>();
-            body.add("grant_type", "refresh_token");
-            body.add("refresh_token", refreshToken.trim()); // Trim whitespace
+                ResponseEntity<SpotifyTokenResponse> response = spotifyRestTemplate.exchange(
+                        SPOTIFY_TOKEN_URL,
+                        HttpMethod.POST,
+                        request,
+                        SpotifyTokenResponse.class
+                );
 
-            // Log request details
-            log.debug("Request body: grant_type=refresh_token, refresh_token={}",
-                    refreshToken.substring(0, Math.min(10, refreshToken.length())) + "...");
+                log.debug("Spotify token refresh completed with status {}", response.getStatusCode());
 
-            // Create HTTP entity
-            HttpEntity<MultiValueMap<String, String>> request = new HttpEntity<>(body, headers);
+                if (response.getBody() == null) {
+                    log.error("Spotify returned null response body");
+                    throw new SpotifyApiException("Spotify token refresh returned null body");
+                }
 
-            // Make POST request
-            ResponseEntity<SpotifyTokenResponse> response = restTemplate.exchange(
-                    SPOTIFY_TOKEN_URL,
-                    HttpMethod.POST,
-                    request,
-                    SpotifyTokenResponse.class
-            );
+                SpotifyTokenResponse tokenResponse = response.getBody();
 
-            log.debug("Response status: {}", response.getStatusCode());
-            log.debug("Response body: {}", response.getBody());
+                if (tokenResponse.getRefresh_token() == null || tokenResponse.getRefresh_token().isEmpty()) {
+                    tokenResponse.setRefresh_token(refreshToken);
+                    log.debug("No new refresh token provided, using existing one");
+                }
 
-            // Validate response
-            if (response.getBody() == null) {
-                log.error("Spotify returned null response body");
-                throw new RuntimeException("Spotify token refresh returned null body");
+                log.info("Successfully refreshed Spotify access token");
+                return tokenResponse;
+
+            } catch (HttpClientErrorException e) {
+                int statusCode = e.getStatusCode().value();
+                if (statusCode == 401 || statusCode == 403) {
+                    // Token revoked or forbidden — non-retryable, user must reconnect Spotify
+                    log.warn("Spotify token refresh rejected with status {}: non-retryable", statusCode);
+                    throw new SpotifyTokenRevokedException("Spotify connection expired. Please reconnect.", e);
+                }
+                // Other 4xx (bad request, etc.) — non-retryable
+                log.error("Spotify token refresh failed with client error {}", statusCode);
+                throw new SpotifyApiException("Spotify token refresh failed: " + statusCode, e);
+
+            } catch (HttpServerErrorException e) {
+                // 5xx — transient, retryable
+                log.warn("Spotify token refresh returned {} (attempt {}/{}), will retry",
+                        e.getStatusCode().value(), attempt, maxAttempts);
+                lastException = e;
+
+            } catch (SpotifyApiException e) {
+                // Already a typed exception (covers SpotifyTokenRevokedException too) — rethrow immediately
+                throw e;
+
+            } catch (Exception e) {
+                // Network / connection timeout — retryable
+                log.warn("Spotify token refresh network error (attempt {}/{}): {}", attempt, maxAttempts, e.getMessage());
+                lastException = e;
             }
 
-            SpotifyTokenResponse tokenResponse = response.getBody();
-
-            // Keep existing refresh token if not provided
-            if (tokenResponse.getRefresh_token() == null || tokenResponse.getRefresh_token().isEmpty()) {
-                tokenResponse.setRefresh_token(refreshToken);
-                log.debug("No new refresh token provided, using existing one");
+            if (attempt < maxAttempts) {
+                try {
+                    Thread.sleep(backoffMs[attempt - 1]);
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                    throw new SpotifyApiException("Spotify token refresh interrupted", ie);
+                }
             }
-
-            log.info("Successfully refreshed Spotify access token");
-            return tokenResponse;
-
-        } catch (HttpClientErrorException e) {
-            log.error("HTTP error while refreshing Spotify token");
-            log.error("Status code: {}", e.getStatusCode());
-            log.error("Response body: {}", e.getResponseBodyAsString());
-            log.error("Request headers would have been: Content-Type: application/x-www-form-urlencoded, Authorization: Basic [credentials]");
-            throw new RuntimeException("Failed to refresh Spotify token: " + e.getStatusCode(), e);
-        } catch (Exception e) {
-            log.error("Unexpected error refreshing Spotify token: {}", e.getMessage(), e);
-            throw new RuntimeException("Failed to refresh Spotify token", e);
         }
+
+        log.error("Spotify token refresh failed after {} attempts", maxAttempts);
+        throw new SpotifyApiException("Spotify service temporarily unavailable", lastException);
+    }
+
+    private SpotifyTokenResponse refreshTokenFallback(String refreshToken, Throwable t) {
+        log.warn("Spotify circuit open for token refresh: {}", t.getMessage());
+        throw new SpotifyApiException("Spotify service temporarily unavailable — circuit open");
     }
 
     @Override
@@ -169,9 +184,7 @@ public class JwtServiceImpl implements JwtService {
     public String generateToken(User user, Map<String, Object> extraClaims) {
         Map<String, Object> claims = new HashMap<>(extraClaims);
         claims.put("userId", user.getId());
-        claims.put("email", user.getEmail());
-        claims.put("authProvider", user.getAuthProvider().toString());
-        claims.put("emailVerified", user.getEmailVerified());
+        claims.put("tokenVersion", user.getTokenVersion() != null ? user.getTokenVersion() : 0);
 
         return Jwts.builder()
                 .setClaims(claims)
@@ -179,7 +192,7 @@ public class JwtServiceImpl implements JwtService {
                 .setIssuedAt(new Date())
                 .setExpiration(new Date(System.currentTimeMillis() +
                         TimeUnit.HOURS.toMillis(jwtExpirationHours)))
-                .signWith(new SecretKeySpec(secret.getBytes(), SignatureAlgorithm.HS256.getJcaName()))
+                .signWith(new SecretKeySpec(secret.getBytes(StandardCharsets.UTF_8), SignatureAlgorithm.HS256.getJcaName()))
                 .compact();
     }
 

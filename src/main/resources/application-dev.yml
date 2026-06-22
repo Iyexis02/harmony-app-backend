@@ -1,0 +1,42 @@
+# ---------------------------------------------------------------
+# Development profile — loaded automatically when:
+#   spring.profiles.active=dev
+#
+# Activate via:
+#   ./mvnw spring-boot:run -Dspring-boot.run.profiles=dev
+#   or set SPRING_PROFILES_ACTIVE=dev in your environment / .env
+#
+# Required env vars (still needed in dev):
+#   ENCRYPTION_SECRET_KEY  — generate with: openssl rand -base64 32
+#   JWT_SECRET_KEY
+#   SPOTIFY_CLIENT_ID
+#   SPOTIFY_CLIENT_SECRET
+#
+# Test controllers (Phase1/2/3) are ONLY registered in this profile.
+# They will not exist in any other profile.
+# ---------------------------------------------------------------
+
+spring:
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    show-sql: true
+    properties:
+      hibernate:
+        format_sql: true
+
+geocoding:
+  provider: nominatim
+
+# OpenAPI documentation — enabled in dev only (Batch I).
+# Swagger UI: http://localhost:8080/swagger-ui.html
+# OpenAPI JSON: http://localhost:8080/api-docs
+springdoc:
+  api-docs:
+    enabled: true
+    path: /api-docs
+  swagger-ui:
+    enabled: true
+    path: /swagger-ui.html
+    operations-sorter: method
+  default-produces-media-type: application/json

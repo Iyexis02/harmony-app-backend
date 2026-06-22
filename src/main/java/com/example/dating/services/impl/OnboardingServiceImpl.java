@@ -6,6 +6,7 @@ import com.example.dating.exceptions.UserNotFoundException;
 import com.example.dating.mappers.UserMapper;
 import com.example.dating.models.geocoding.GeocodingResult;
 import com.example.dating.models.onboarding.dto.*;
+import com.example.dating.models.user.common.dao.UserEntity;
 import com.example.dating.models.user.common.dto.UserDtoResponse;
 import com.example.dating.models.user.dating.dao.UserDatingPreferences;
 import com.example.dating.models.user.domain.User;
@@ -14,7 +15,6 @@ import com.example.dating.models.user.personality.dao.UserPersonality;
 import com.example.dating.models.user.photos.dao.UserPhoto;
 import com.example.dating.models.user.preferences.dao.UserMusicPreferences;
 import com.example.dating.models.user.privacy.dao.UserPrivacySettings;
-import com.example.dating.postgres.UserRepository;
 import com.example.dating.repositories.*;
 import com.example.dating.services.GeocodingService;
 import com.example.dating.services.JwtService;
@@ -37,7 +37,7 @@ import java.util.stream.Collectors;
 @RequiredArgsConstructor
 public class OnboardingServiceImpl implements OnboardingService {
 
-    private final UserRepository userRepository;
+    private final UserJpaRepository userJpaRepository;
     private final GeocodingService geocodingService;
     private final UserMapper userMapper;
     private final UserMusicPreferencesRepository musicPreferencesRepository;
@@ -47,11 +47,12 @@ public class OnboardingServiceImpl implements OnboardingService {
     private final UserPrivacySettingsRepository privacySettingsRepository;
     private final UserPhotoRepository photoRepository;
     private final com.example.dating.mappers.OnboardingMapper onboardingMapper;
+    private final com.example.dating.services.matching.GenreExtractionService genreExtractionService;
 
     @Override
     @Transactional
     public UserDtoResponse updateBasicProfile(String id, BasicProfileRequestDto request) throws JwtException, UserNotFoundException, IllegalArgumentException, OptimisticLockingFailureException {
-        Optional<User> optUser = userRepository.findById(id);
+        Optional<User> optUser = userJpaRepository.findById(id).map(userMapper::toDomain);
         if (optUser.isEmpty()) {
             throw new UserNotFoundException("User with id " + id + " not found");
         }
@@ -68,15 +69,13 @@ public class OnboardingServiceImpl implements OnboardingService {
             user.getUserEntity().setRegistrationStage(RegistrationStage.BASIC_PROFILE);
         }
 
-        return userMapper.toDtoResponse(userRepository.save(user));
-
+        return userMapper.toDtoResponse(userMapper.toDomain(userJpaRepository.save(userMapper.toEntity(user))));
     }
 
     @Override
     @Transactional
     public UserDtoResponse updateLocation(String id, LocationDto request) throws JwtException, UserNotFoundException, IllegalArgumentException, OptimisticLockingFailureException {
-
-        Optional<User> optUser = userRepository.findById(id);
+        Optional<User> optUser = userJpaRepository.findById(id).map(userMapper::toDomain);
         if (optUser.isEmpty()) {
             throw new UserNotFoundException("User with id " + id + " not found");
         }
@@ -99,13 +98,13 @@ public class OnboardingServiceImpl implements OnboardingService {
             user.getUserEntity().setRegistrationStage(RegistrationStage.LOCATION_INFO);
         }
 
-        return userMapper.toDtoResponse(userRepository.save(user));
+        return userMapper.toDtoResponse(userMapper.toDomain(userJpaRepository.save(userMapper.toEntity(user))));
     }
 
     @Override
     @Transactional
     public UserDtoResponse updatePhotos(String id, PhotosRequestDto request) throws JwtException, UserNotFoundException, IllegalArgumentException, OptimisticLockingFailureException {
-        Optional<User> optUser = userRepository.findById(id);
+        Optional<User> optUser = userJpaRepository.findById(id).map(userMapper::toDomain);
         if (optUser.isEmpty()) {
             throw new UserNotFoundException("User with id " + id + " not found");
         }
@@ -133,15 +132,13 @@ public class OnboardingServiceImpl implements OnboardingService {
             user.getUserEntity().setRegistrationStage(RegistrationStage.PHOTOS);
         }
 
-        // Save user to persist registration stage update (or just to update updatedAt timestamp)
-        // UserMapper now properly updates existing entity instead of creating new one
-        return userMapper.toDtoResponse(userRepository.save(user));
+        return userMapper.toDtoResponse(userMapper.toDomain(userJpaRepository.save(userMapper.toEntity(user))));
     }
 
     @Override
     @Transactional
     public UserDtoResponse updateMusicPreferences(String id, MusicPreferencesRequestDto request) throws JwtException, UserNotFoundException, IllegalArgumentException, OptimisticLockingFailureException {
-        Optional<User> optUser = userRepository.findById(id);
+        Optional<User> optUser = userJpaRepository.findById(id).map(userMapper::toDomain);
         if (optUser.isEmpty()) {
             throw new UserNotFoundException("User with id " + id + " not found");
         }
@@ -169,21 +166,36 @@ public class OnboardingServiceImpl implements OnboardingService {
 
         musicPreferencesRepository.save(musicPreferences);
 
+        // Option 2: also persist the weighted GenrePreference records the matching engine scores
+        // against. Previously the client fanned out separate POST /preferences/genres calls, which
+        // the email-verification filter blocks for unverified users — so the genre list looked
+        // saved (CSV above) while the matcher had nothing. Folding it into this already-exempt
+        // write closes that silent data gap. Joins this @Transactional method, so it commits
+        // atomically with the CSV + registration-stage update.
+        genreExtractionService.replaceManualPreferences(user, request.getFavoriteGenres());
+
         // Update registration stage ONLY if user is still in onboarding (not FINISHED)
         if (user.getRegistrationStage() != RegistrationStage.FINISHED) {
             user.setRegistrationStage(RegistrationStage.MUSIC_PREFERENCES);
             user.getUserEntity().setRegistrationStage(RegistrationStage.MUSIC_PREFERENCES);
         }
 
-        // Save user to persist registration stage update (or just to update updatedAt timestamp)
-        // UserMapper now properly updates existing entity instead of creating new one
-        return userMapper.toDtoResponse(userRepository.save(user));
+        UserEntity saved = userJpaRepository.save(userMapper.toEntity(user));
+
+        // Bump updatedAt so cached match scores are invalidated (stale if either user updated since
+        // computedAt). A FINISHED user re-submitting the music step leaves the UserEntity itself
+        // unchanged, so @PreUpdate would not fire and the bumped genres would otherwise score
+        // against a still-fresh cache. Runs after save() so the merge flush precedes this bulk
+        // UPDATE. Mirrors GenreExtractionService.persistGenreSync.
+        userJpaRepository.touchUpdatedAt(id);
+
+        return userMapper.toDtoResponse(userMapper.toDomain(saved));
     }
 
     @Override
     @Transactional
     public UserDtoResponse updateLifestyle(String id, LifestyleRequestDto request) throws JwtException, UserNotFoundException, IllegalArgumentException, OptimisticLockingFailureException {
-        Optional<User> optUser = userRepository.findById(id);
+        Optional<User> optUser = userJpaRepository.findById(id).map(userMapper::toDomain);
         if (optUser.isEmpty()) {
             throw new UserNotFoundException("User with id " + id + " not found");
         }
@@ -216,15 +228,13 @@ public class OnboardingServiceImpl implements OnboardingService {
             user.getUserEntity().setRegistrationStage(RegistrationStage.LIFESTYLE);
         }
 
-        // Save user to persist registration stage update (or just to update updatedAt timestamp)
-        // UserMapper now properly updates existing entity instead of creating new one
-        return userMapper.toDtoResponse(userRepository.save(user));
+        return userMapper.toDtoResponse(userMapper.toDomain(userJpaRepository.save(userMapper.toEntity(user))));
     }
 
     @Override
     @Transactional
     public UserDtoResponse updatePersonality(String id, PersonalityRequestDto request) throws JwtException, UserNotFoundException, IllegalArgumentException, OptimisticLockingFailureException {
-        Optional<User> optUser = userRepository.findById(id);
+        Optional<User> optUser = userJpaRepository.findById(id).map(userMapper::toDomain);
         if (optUser.isEmpty()) {
             throw new UserNotFoundException("User with id " + id + " not found");
         }
@@ -255,15 +265,13 @@ public class OnboardingServiceImpl implements OnboardingService {
             user.getUserEntity().setRegistrationStage(RegistrationStage.PERSONALITY);
         }
 
-        // Save user to persist registration stage update (or just to update updatedAt timestamp)
-        // UserMapper now properly updates existing entity instead of creating new one
-        return userMapper.toDtoResponse(userRepository.save(user));
+        return userMapper.toDtoResponse(userMapper.toDomain(userJpaRepository.save(userMapper.toEntity(user))));
     }
 
     @Override
     @Transactional
     public UserDtoResponse updateDatingPreferences(String id, DatingPreferencesRequestDto request) throws JwtException, UserNotFoundException, IllegalArgumentException, OptimisticLockingFailureException {
-        Optional<User> optUser = userRepository.findById(id);
+        Optional<User> optUser = userJpaRepository.findById(id).map(userMapper::toDomain);
         if (optUser.isEmpty()) {
             throw new UserNotFoundException("User with id " + id + " not found");
         }
@@ -307,15 +315,13 @@ public class OnboardingServiceImpl implements OnboardingService {
             user.getUserEntity().setRegistrationStage(RegistrationStage.DATING_PREFERENCES);
         }
 
-        // Save user to persist registration stage update (or just to update updatedAt timestamp)
-        // UserMapper now properly updates existing entity instead of creating new one
-        return userMapper.toDtoResponse(userRepository.save(user));
+        return userMapper.toDtoResponse(userMapper.toDomain(userJpaRepository.save(userMapper.toEntity(user))));
     }
 
     @Override
     @Transactional
     public UserDtoResponse updatePrivacySettings(String id, PrivacySettingsRequestDto request) throws JwtException, UserNotFoundException, IllegalArgumentException, OptimisticLockingFailureException {
-        Optional<User> optUser = userRepository.findById(id);
+        Optional<User> optUser = userJpaRepository.findById(id).map(userMapper::toDomain);
         if (optUser.isEmpty()) {
             throw new UserNotFoundException("User with id " + id + " not found");
         }
@@ -353,86 +359,69 @@ public class OnboardingServiceImpl implements OnboardingService {
             user.getUserEntity().setRegistrationStage(RegistrationStage.FINISHED);
         }
 
-        // Save user to persist registration stage update (or just to update updatedAt timestamp)
-        // UserMapper now properly updates existing entity instead of creating new one
-        return userMapper.toDtoResponse(userRepository.save(user));
+        return userMapper.toDtoResponse(userMapper.toDomain(userJpaRepository.save(userMapper.toEntity(user))));
     }
 
     @Override
     @Transactional(readOnly = true)
     public CompleteProfileResponseDto getCompleteProfile(String id) throws UserNotFoundException {
-        Optional<User> optUser = userRepository.findById(id);
-        if (optUser.isEmpty()) {
-            throw new UserNotFoundException("User with id " + id + " not found");
-        }
-        return onboardingMapper.toCompleteProfileDto(optUser.get().getUserEntity());
+        UserEntity entity = userJpaRepository.findById(id)
+                .orElseThrow(() -> new UserNotFoundException("User with id " + id + " not found"));
+        return onboardingMapper.toCompleteProfileDto(entity);
     }
 
     @Override
     @Transactional(readOnly = true)
     public OnboardingProgressDto getOnboardingProgress(String id) throws UserNotFoundException {
-        Optional<User> optUser = userRepository.findById(id);
-        if (optUser.isEmpty()) {
-            throw new UserNotFoundException("User with id " + id + " not found");
-        }
-        return onboardingMapper.toProgressDto(optUser.get().getUserEntity());
+        UserEntity entity = userJpaRepository.findById(id)
+                .orElseThrow(() -> new UserNotFoundException("User with id " + id + " not found"));
+        return onboardingMapper.toProgressDto(entity);
     }
 
     @Override
     @Transactional(readOnly = true)
     public MusicPreferencesResponseDto getMusicPreferences(String id) throws UserNotFoundException {
-        Optional<User> optUser = userRepository.findById(id);
-        if (optUser.isEmpty()) {
-            throw new UserNotFoundException("User with id " + id + " not found");
-        }
-        return onboardingMapper.toMusicPreferencesDto(optUser.get().getUserEntity().getMusicPreferences());
+        UserEntity entity = userJpaRepository.findById(id)
+                .orElseThrow(() -> new UserNotFoundException("User with id " + id + " not found"));
+        return onboardingMapper.toMusicPreferencesDto(entity.getMusicPreferences());
     }
 
     @Override
     @Transactional(readOnly = true)
     public LifestyleResponseDto getLifestyle(String id) throws UserNotFoundException {
-        Optional<User> optUser = userRepository.findById(id);
-        if (optUser.isEmpty()) {
-            throw new UserNotFoundException("User with id " + id + " not found");
-        }
-        return onboardingMapper.toLifestyleDto(optUser.get().getUserEntity().getLifestyle());
+        UserEntity entity = userJpaRepository.findById(id)
+                .orElseThrow(() -> new UserNotFoundException("User with id " + id + " not found"));
+        return onboardingMapper.toLifestyleDto(entity.getLifestyle());
     }
 
     @Override
     @Transactional(readOnly = true)
     public PersonalityResponseDto getPersonality(String id) throws UserNotFoundException {
-        Optional<User> optUser = userRepository.findById(id);
-        if (optUser.isEmpty()) {
-            throw new UserNotFoundException("User with id " + id + " not found");
-        }
-        return onboardingMapper.toPersonalityDto(optUser.get().getUserEntity().getPersonality());
+        UserEntity entity = userJpaRepository.findById(id)
+                .orElseThrow(() -> new UserNotFoundException("User with id " + id + " not found"));
+        return onboardingMapper.toPersonalityDto(entity.getPersonality());
     }
 
     @Override
     @Transactional(readOnly = true)
     public DatingPreferencesResponseDto getDatingPreferences(String id) throws UserNotFoundException {
-        Optional<User> optUser = userRepository.findById(id);
-        if (optUser.isEmpty()) {
-            throw new UserNotFoundException("User with id " + id + " not found");
-        }
-        return onboardingMapper.toDatingPreferencesDto(optUser.get().getUserEntity().getDatingPreferences());
+        UserEntity entity = userJpaRepository.findById(id)
+                .orElseThrow(() -> new UserNotFoundException("User with id " + id + " not found"));
+        return onboardingMapper.toDatingPreferencesDto(entity.getDatingPreferences());
     }
 
     @Override
     @Transactional(readOnly = true)
     public PrivacySettingsResponseDto getPrivacySettings(String id) throws UserNotFoundException {
-        Optional<User> optUser = userRepository.findById(id);
-        if (optUser.isEmpty()) {
-            throw new UserNotFoundException("User with id " + id + " not found");
-        }
-        return onboardingMapper.toPrivacySettingsDto(optUser.get().getUserEntity().getPrivacySettings());
+        UserEntity entity = userJpaRepository.findById(id)
+                .orElseThrow(() -> new UserNotFoundException("User with id " + id + " not found"));
+        return onboardingMapper.toPrivacySettingsDto(entity.getPrivacySettings());
     }
 
     @Override
     @Transactional(readOnly = true)
     public List<PhotoResponseDto> getPhotos(String id) throws UserNotFoundException {
-        Optional<User> optUser = userRepository.findById(id);
-        if (optUser.isEmpty()) {
+        if (userJpaRepository.findById(id).isEmpty()) {
             throw new UserNotFoundException("User with id " + id + " not found");
         }
         List<UserPhoto> photos = photoRepository.findByUserIdOrderByDisplayOrderAsc(id);

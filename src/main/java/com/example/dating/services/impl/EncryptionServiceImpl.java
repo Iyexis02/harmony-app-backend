@@ -25,6 +25,12 @@ public class EncryptionServiceImpl implements EncryptionService {
     private final SecretKey secretKey;
 
     public EncryptionServiceImpl(@Value("${encryption.secret.key}") String encryptionKey) throws IllegalArgumentException  {
+        if (encryptionKey == null || encryptionKey.isBlank()) {
+            throw new IllegalStateException(
+                "ENCRYPTION_SECRET_KEY environment variable must be set. " +
+                "Generate one with: openssl rand -base64 32"
+            );
+        }
         // Convert base64 encoded key to SecretKey
         byte[] decodedKey = Base64.getDecoder().decode(encryptionKey);
         this.secretKey = new SecretKeySpec(decodedKey, 0, decodedKey.length, "AES");
@@ -61,7 +67,7 @@ public class EncryptionServiceImpl implements EncryptionService {
         } catch (NullPointerException | NoSuchAlgorithmException | NoSuchPaddingException | InvalidKeyException |
                  IllegalBlockSizeException | BadPaddingException e) {
             log.error("Error during encrypting data", e);
-            throw new RuntimeException("Decryption failed", e);
+            throw new RuntimeException("Encryption failed", e);
         } catch (Exception e) {
             log.error("Unexpected Error encrypting data", e);
             throw new RuntimeException("Encryption failed", e);

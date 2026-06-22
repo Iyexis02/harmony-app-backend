@@ -4,6 +4,7 @@ import com.example.dating.models.spotify.app.dto.ArtistSearchResult;
 import com.example.dating.models.spotify.app.dto.TrackSearchResult;
 import com.example.dating.models.user.domain.SpotifyArtist;
 import com.example.dating.services.SpotifyAppService;
+import io.swagger.v3.oas.annotations.tags.Tag;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.HttpStatus;
@@ -23,6 +24,7 @@ import static com.example.dating.constants.AppConstants.BASE_API_ROUTE;
  *
  * Uses app-level Spotify authentication (Client Credentials flow).
  */
+@Tag(name = "Spotify (Public)", description = "Public artist and track search — no authentication required")
 @Slf4j
 @RequiredArgsConstructor
 @RequestMapping(BASE_API_ROUTE + "/spotify")

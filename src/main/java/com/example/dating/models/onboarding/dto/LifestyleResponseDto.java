@@ -19,6 +19,6 @@ public class LifestyleResponseDto {
     private SmokingHabits smokingHabits;
     private DrinkingHabits drinkingHabits;
     private ExerciseFrequency exerciseFrequency;
-    private String religion;
-    private String politicalViews;
+    private Religion religion;
+    private PoliticalViews politicalViews;
 }

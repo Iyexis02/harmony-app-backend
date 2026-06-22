@@ -1,0 +1,3030 @@
+openapi: 3.0.3
+
+info:
+  title: Dating App API
+  version: 1.0.0
+  description: |
+    Music-based dating application backend. Matches users based on Spotify listening history,
+    lifestyle compatibility, and behavioral learning.
+
+    ## Authentication
+    Most endpoints require a JWT passed as `Authorization: Bearer <token>`.
+    JWT claims: `{ userId, tokenVersion, sub, iat, exp }`.
+
+    After a password reset `tokenVersion` is incremented — all prior tokens are invalidated.
+    Deleted-user JWTs return **401** (not 404).
+
+    ## Email Verification
+    Unverified-email users receive **403** `{"error":"Email verification required"}` on all
+    endpoints except `/api/v1/auth/**`, `/api/v1/onboarding/**`, `/public/**`, and `/api/test/**`.
+
+    ## Rate Limiting
+    | Action | Limit | Key |
+    |--------|-------|-----|
+    | Swipe | 60/min | userId |
+    | Score calculation | 30/min | userId |
+    | Unauthenticated | per IP | remoteAddr |
+
+    Exceeded limits return **429**.
+
+    ## Error Contract
+    Every error response follows:
+    ```json
+    { "code": "string", "message": "string", "fields": {}, "timestamp": "ISO8601" }
+    ```
+    Always switch on `code`, never on `message`.
+
+  contact:
+    name: API Support
+    email: mladen.hangi@kodelab.hr
+
+servers:
+  - url: http://localhost:8080
+    description: Local development
+
+security:
+  - BearerAuth: []
+
+tags:
+  - name: Authentication
+    description: Registration, login, email verification, password reset, and Spotify account linking
+  - name: Onboarding
+    description: Multi-step profile setup — basic info, location, photos, music, lifestyle, personality, dating preferences, privacy
+  - name: Matching
+    description: Potential match recommendations, swipe, match management, and analytics
+  - name: Genre Preferences
+    description: Music genre preference CRUD and Spotify sync
+  - name: Account
+    description: Account management — view profile and delete account
+  - name: User
+    description: Current user Spotify profile, top artists and tracks
+  - name: Spotify (Public)
+    description: Public artist and track search — no authentication required
+
+paths:
+
+  # ─── Auth ──────────────────────────────────────────────────────────────────
+
+  /api/v1/auth/register:
+    post:
+      tags: [Authentication]
+      summary: Register with email and password
+      operationId: register
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RegisterRequest'
+            example:
+              email: alice@example.com
+              name: Alice Smith
+              password: Secret@123
+      responses:
+        '201':
+          description: Registration successful
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthResponse'
+              example:
+                token: eyJhbGciOiJIUzI1NiJ9...
+                userId: 550e8400-e29b-41d4-a716-446655440000
+                email: alice@example.com
+                name: Alice Smith
+                registrationStage: STARTED
+                emailVerified: false
+                authProvider: EMAIL
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '409':
+          $ref: '#/components/responses/EmailExists'
+
+  /api/v1/auth/login:
+    post:
+      tags: [Authentication]
+      summary: Login with email and password
+      operationId: login
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+            example:
+              email: alice@example.com
+              password: Secret@123
+      responses:
+        '200':
+          description: Login successful
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '429':
+          $ref: '#/components/responses/AccountLocked'
+
+  /api/v1/auth/spotify-login:
+    post:
+      tags: [Authentication]
+      summary: Spotify OAuth login — creates or finds user
+      operationId: spotifyLogin
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SpotifyLoginRequest'
+      responses:
+        '200':
+          description: Spotify login successful
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthResponse'
+
+  /api/v1/auth/verify-email:
+    post:
+      tags: [Authentication]
+      summary: Verify email address with token
+      operationId: verifyEmail
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/EmailVerificationRequest'
+      responses:
+        '200':
+          description: Email verified
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+              example:
+                message: Email verified successfully
+        '400':
+          $ref: '#/components/responses/InvalidToken'
+
+  /api/v1/auth/resend-verification:
+    post:
+      tags: [Authentication]
+      summary: Resend email verification link
+      description: Always returns 200 to prevent user enumeration.
+      operationId: resendVerification
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/EmailRequest'
+      responses:
+        '200':
+          description: Verification email sent (or silently skipped if email not found)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+              example:
+                message: If the email exists, verification email will be sent
+
+  /api/v1/auth/forgot-password:
+    post:
+      tags: [Authentication]
+      summary: Request a password reset link
+      description: Always returns 200 to prevent user enumeration.
+      operationId: forgotPassword
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/EmailRequest'
+      responses:
+        '200':
+          description: Reset link sent (or silently skipped)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+              example:
+                message: If the email exists, a password reset link will be sent
+
+  /api/v1/auth/reset-password:
+    post:
+      tags: [Authentication]
+      summary: Reset password using a reset token
+      description: |
+        Resets the password and increments `tokenVersion`, invalidating all existing JWTs.
+        The frontend must force re-login after a successful reset.
+      operationId: resetPassword
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ResetPasswordRequest'
+      responses:
+        '200':
+          description: Password reset successful
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+              example:
+                message: Password reset successfully
+        '400':
+          $ref: '#/components/responses/InvalidToken'
+
+  /api/v1/auth/connect-spotify:
+    post:
+      tags: [Authentication]
+      summary: Link Spotify to an existing email account
+      operationId: connectSpotify
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ConnectSpotifyRequest'
+      responses:
+        '200':
+          description: Spotify account linked
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  # ─── Onboarding ────────────────────────────────────────────────────────────
+
+  /api/v1/onboarding/basic-info:
+    put:
+      tags: [Onboarding]
+      summary: Update basic profile info
+      operationId: updateBasicInfo
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BasicProfileRequest'
+      responses:
+        '200':
+          description: Profile updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserDtoResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/v1/onboarding/location:
+    put:
+      tags: [Onboarding]
+      summary: Update location
+      operationId: updateLocation
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LocationRequest'
+      responses:
+        '200':
+          description: Location updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserDtoResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/v1/onboarding/photos:
+    put:
+      tags: [Onboarding]
+      summary: Update profile photos
+      operationId: updatePhotos
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PhotosRequest'
+      responses:
+        '200':
+          description: Photos updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserDtoResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/v1/onboarding/music-preferences:
+    put:
+      tags: [Onboarding]
+      summary: Update music preferences
+      operationId: updateMusicPreferences
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MusicPreferencesRequest'
+      responses:
+        '200':
+          description: Music preferences updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserDtoResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+    get:
+      tags: [Onboarding]
+      summary: Get music preferences (deprecated)
+      description: '**Deprecated.** Use `GET /api/v1/onboarding/profile` instead. Sunset: 2026-06-11.'
+      operationId: getMusicPreferences
+      deprecated: true
+      responses:
+        '200':
+          description: Music preferences
+          headers:
+            Sunset:
+              schema:
+                type: string
+              example: Thu, 11 Jun 2026 00:00:00 GMT
+            Deprecation:
+              schema:
+                type: string
+              example: 'true'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MusicPreferencesResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/v1/onboarding/lifestyle:
+    put:
+      tags: [Onboarding]
+      summary: Update lifestyle information
+      operationId: updateLifestyle
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LifestyleRequest'
+      responses:
+        '200':
+          description: Lifestyle updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserDtoResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+    get:
+      tags: [Onboarding]
+      summary: Get lifestyle (deprecated)
+      description: '**Deprecated.** Use `GET /api/v1/onboarding/profile` instead. Sunset: 2026-06-11.'
+      operationId: getLifestyle
+      deprecated: true
+      responses:
+        '200':
+          description: Lifestyle data
+          headers:
+            Sunset:
+              schema:
+                type: string
+            Deprecation:
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LifestyleResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/v1/onboarding/personality:
+    put:
+      tags: [Onboarding]
+      summary: Update personality and bio
+      operationId: updatePersonality
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PersonalityRequest'
+      responses:
+        '200':
+          description: Personality updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserDtoResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+    get:
+      tags: [Onboarding]
+      summary: Get personality (deprecated)
+      description: '**Deprecated.** Use `GET /api/v1/onboarding/profile` instead. Sunset: 2026-06-11.'
+      operationId: getPersonality
+      deprecated: true
+      responses:
+        '200':
+          description: Personality data
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PersonalityResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/v1/onboarding/dating-preferences:
+    put:
+      tags: [Onboarding]
+      summary: Update dating preferences
+      operationId: updateDatingPreferences
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DatingPreferencesRequest'
+      responses:
+        '200':
+          description: Dating preferences updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserDtoResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+    get:
+      tags: [Onboarding]
+      summary: Get dating preferences (deprecated)
+      description: '**Deprecated.** Use `GET /api/v1/onboarding/profile` instead. Sunset: 2026-06-11.'
+      operationId: getDatingPreferences
+      deprecated: true
+      responses:
+        '200':
+          description: Dating preferences
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DatingPreferencesResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/v1/onboarding/privacy-settings:
+    put:
+      tags: [Onboarding]
+      summary: Update privacy settings
+      operationId: updatePrivacySettings
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PrivacySettingsRequest'
+      responses:
+        '200':
+          description: Privacy settings updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserDtoResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+    get:
+      tags: [Onboarding]
+      summary: Get privacy settings (deprecated)
+      description: '**Deprecated.** Use `GET /api/v1/onboarding/profile` instead. Sunset: 2026-06-11.'
+      operationId: getPrivacySettings
+      deprecated: true
+      responses:
+        '200':
+          description: Privacy settings
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PrivacySettingsResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/v1/onboarding/profile:
+    get:
+      tags: [Onboarding]
+      summary: Get complete profile with all sub-sections
+      description: The canonical read endpoint. Returns all onboarding data in a single response.
+      operationId: getCompleteProfile
+      responses:
+        '200':
+          description: Complete profile
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CompleteProfileResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/v1/onboarding/progress:
+    get:
+      tags: [Onboarding]
+      summary: Get onboarding progress (deprecated)
+      description: '**Deprecated.** Use `GET /api/v1/onboarding/profile` instead. Sunset: 2026-06-11.'
+      operationId: getOnboardingProgress
+      deprecated: true
+      responses:
+        '200':
+          description: Onboarding progress
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OnboardingProgressResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/v1/onboarding/photos:
+    get:
+      tags: [Onboarding]
+      summary: Get photos (deprecated)
+      description: '**Deprecated.** Use `GET /api/v1/onboarding/profile` instead. Sunset: 2026-06-11.'
+      operationId: getPhotos
+      deprecated: true
+      responses:
+        '200':
+          description: List of photos
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/PhotoResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  # ─── Matching ──────────────────────────────────────────────────────────────
+
+  /api/v1/matching/potential:
+    get:
+      tags: [Matching]
+      summary: Get paginated match recommendations
+      operationId: getPotentialMatches
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+          description: Number of results per page
+        - name: offset
+          in: query
+          schema:
+            type: integer
+            minimum: 0
+            default: 0
+          description: Pagination offset
+        - name: minScore
+          in: query
+          schema:
+            type: number
+            format: double
+            minimum: 0
+            maximum: 100
+            default: 0
+          description: Minimum compatibility score filter
+        - name: excludeSwiped
+          in: query
+          schema:
+            type: boolean
+            default: true
+          description: Exclude already-swiped users
+      responses:
+        '200':
+          description: Paginated potential matches
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PotentialMatchPage'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/v1/matching/score/{otherUserId}:
+    get:
+      tags: [Matching]
+      summary: Get detailed compatibility score with another user
+      description: |
+        Returns the directional score (current user → other user). Rate limited to 30/min.
+        Blocked relationships return 403. Self-scoring returns 400.
+      operationId: getMatchScore
+      parameters:
+        - name: otherUserId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+          example: 550e8400-e29b-41d4-a716-446655440001
+      responses:
+        '200':
+          description: Detailed compatibility score
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MatchScore'
+        '400':
+          $ref: '#/components/responses/InvalidArgument'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+
+  /api/v1/matching/swipe:
+    post:
+      tags: [Matching]
+      summary: Record a swipe action
+      description: |
+        Rate limited to 60/min.
+        - `super_like` triggers instant match.
+        - `block` prevents all future interactions and auto-unmatches any active match.
+      operationId: recordSwipe
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SwipeRequest'
+            example:
+              swipedUserId: 550e8400-e29b-41d4-a716-446655440001
+              action: like
+              platform: web
+      responses:
+        '200':
+          description: Swipe recorded
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SwipeResult'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/DuplicateSwipe'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+
+  /api/v1/matching/swipe/{swipedUserId}:
+    delete:
+      tags: [Matching]
+      summary: Undo the current user's swipe on a user
+      description: |
+        Removes the current user's swipe row for the given target user so the candidate can
+        resurface in `/potential`. Works for any prior action (like/pass/super_like; undoing a
+        `block` row also un-blocks). A swipe that already resulted in a match cannot be undone —
+        unmatch via `DELETE /matching/matches/{matchId}` first.
+      operationId: undoSwipe
+      parameters:
+        - name: swipedUserId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+          example: 550e8400-e29b-41d4-a716-446655440001
+      responses:
+        '200':
+          description: Swipe undone
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                  swipedUserId:
+                    type: string
+                    format: uuid
+              example:
+                message: Swipe undone
+                swipedUserId: 550e8400-e29b-41d4-a716-446655440001
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: No swipe to undo for this user (code `NOT_FOUND`)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                code: NOT_FOUND
+                message: No swipe to undo for this user
+                fields: null
+                timestamp: 2026-06-08T10:15:30.123Z
+        '409':
+          description: The swipe already resulted in a match (code `CONFLICT`) — unmatch first
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                code: CONFLICT
+                message: Cannot undo a swipe that resulted in a match
+                fields: null
+                timestamp: 2026-06-08T10:15:30.123Z
+
+  /api/v1/matching/matches:
+    get:
+      tags: [Matching]
+      summary: Get paginated matches for the current user
+      operationId: getMatches
+      parameters:
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [active, all]
+            default: active
+          description: Filter by match status
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+        - name: offset
+          in: query
+          schema:
+            type: integer
+            minimum: 0
+            default: 0
+      responses:
+        '200':
+          description: Paginated match list
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MatchPageResponse'
+        '400':
+          $ref: '#/components/responses/InvalidArgument'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/v1/matching/matches/{matchId}:
+    delete:
+      tags: [Matching]
+      summary: Unmatch
+      description: Only the two participants of the match may call this endpoint.
+      operationId: unmatch
+      parameters:
+        - name: matchId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+          example: 660e8400-e29b-41d4-a716-446655440000
+      responses:
+        '200':
+          description: Successfully unmatched
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                  matchId:
+                    type: string
+                    format: uuid
+              example:
+                message: Successfully unmatched
+                matchId: 660e8400-e29b-41d4-a716-446655440000
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/matching/analytics:
+    get:
+      tags: [Matching]
+      summary: Get swipe analytics for the current user
+      operationId: getAnalytics
+      responses:
+        '200':
+          description: Analytics data
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AnalyticsResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  # ─── Genre Preferences ─────────────────────────────────────────────────────
+
+  /api/v1/preferences/genres:
+    get:
+      tags: [Genre Preferences]
+      summary: Get current user's genre preferences
+      operationId: getGenrePreferences
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 20
+      responses:
+        '200':
+          description: Genre preferences list
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenrePreferenceListResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+    post:
+      tags: [Genre Preferences]
+      summary: Add a manual genre preference
+      operationId: addGenrePreference
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AddGenrePreferenceRequest'
+            example:
+              genreName: indie-rock
+              weight: 0.9
+      responses:
+        '201':
+          description: Genre preference added
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenrePreferenceCreateResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/v1/preferences/genres/sync:
+    post:
+      tags: [Genre Preferences]
+      summary: Sync genre preferences from Spotify
+      operationId: syncGenrePreferences
+      parameters:
+        - name: quick
+          in: query
+          schema:
+            type: boolean
+            default: false
+          description: Quick sync uses only short-term listening data
+      responses:
+        '200':
+          description: Sync successful
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenreSyncResponse'
+              example:
+                success: true
+                message: Genre preferences synced successfully
+                genreCount: 12
+        '400':
+          $ref: '#/components/responses/InvalidArgument'
+        '401':
+          $ref: '#/components/responses/SpotifyTokenExpired'
+        '502':
+          $ref: '#/components/responses/SpotifyUnavailable'
+
+  /api/v1/preferences/genres/spotify:
+    delete:
+      tags: [Genre Preferences]
+      summary: Clear all Spotify-derived genre preferences
+      operationId: clearSpotifyGenrePreferences
+      responses:
+        '200':
+          description: Spotify preferences cleared
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessMessageResponse'
+              example:
+                success: true
+                message: Spotify preferences cleared
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/v1/preferences/genres/{genreName}:
+    delete:
+      tags: [Genre Preferences]
+      summary: Remove a specific genre preference
+      operationId: removeGenrePreference
+      parameters:
+        - name: genreName
+          in: path
+          required: true
+          schema:
+            type: string
+          example: indie-rock
+      responses:
+        '200':
+          description: Genre preference removed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessMessageResponse'
+              example:
+                success: true
+                message: Genre preference removed
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  # ─── Account ───────────────────────────────────────────────────────────────
+
+  /api/v1/users/me:
+    delete:
+      tags: [Account]
+      summary: Delete the current user's account
+      description: |
+        Permanently deletes the account and all associated data.
+        - EMAIL auth users must supply their password.
+        - Spotify-only users may omit the request body.
+        - All existing JWTs for this user will return 401 after deletion.
+      operationId: deleteAccount
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DeleteAccountRequest'
+            example:
+              password: Secret@123
+      responses:
+        '204':
+          description: Account deleted — no content
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/v1/users/{id}/profile:
+    get:
+      tags: [Account]
+      summary: Get a user's public profile
+      description: |
+        Returns the public profile of another user.
+        - If `isProfilePublic=false` → 404 (prevents user-ID enumeration).
+        - If a block relationship exists (either direction) → 404.
+        - Profile owner always sees full data; non-owners see privacy-gated fields.
+      operationId: getUserProfile
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+          example: 550e8400-e29b-41d4-a716-446655440001
+      responses:
+        '200':
+          description: User public profile
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserProfileResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  # ─── User / Spotify (authenticated) ───────────────────────────────────────
+
+  /api/v1/user:
+    get:
+      tags: [User]
+      summary: Get current user's Spotify profile
+      description: Requires a connected Spotify account.
+      operationId: getSpotifyUserProfile
+      responses:
+        '200':
+          description: Spotify user profile
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SpotifyUserProfile'
+        '401':
+          $ref: '#/components/responses/SpotifyTokenExpired'
+        '502':
+          $ref: '#/components/responses/SpotifyUnavailable'
+
+  /api/v1/user/artists:
+    get:
+      tags: [User]
+      summary: Get current user's top artists from Spotify
+      operationId: getTopArtists
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 20
+        - name: time_range
+          in: query
+          schema:
+            type: string
+            enum: [short_term, medium_term, long_term]
+            default: medium_term
+        - name: offset
+          in: query
+          schema:
+            type: integer
+            default: 0
+      responses:
+        '200':
+          description: Top artists
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SpotifyArtistPage'
+        '401':
+          $ref: '#/components/responses/SpotifyTokenExpired'
+        '502':
+          $ref: '#/components/responses/SpotifyUnavailable'
+
+  /api/v1/user/tracks:
+    get:
+      tags: [User]
+      summary: Get current user's top tracks from Spotify
+      operationId: getTopTracks
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 20
+        - name: time_range
+          in: query
+          schema:
+            type: string
+            enum: [short_term, medium_term, long_term]
+            default: medium_term
+        - name: offset
+          in: query
+          schema:
+            type: integer
+            default: 0
+      responses:
+        '200':
+          description: Top tracks
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SpotifyTrackPage'
+        '401':
+          $ref: '#/components/responses/SpotifyTokenExpired'
+        '502':
+          $ref: '#/components/responses/SpotifyUnavailable'
+
+  /api/v1/user/genres:
+    get:
+      tags: [User]
+      summary: Get suggested genres from user's Spotify history
+      operationId: getSuggestedGenres
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 20
+        - name: time_range
+          in: query
+          schema:
+            type: string
+            enum: [short_term, medium_term, long_term]
+            default: medium_term
+      responses:
+        '200':
+          description: List of genre names
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: string
+              example: [pop, indie-rock, alternative]
+        '401':
+          $ref: '#/components/responses/SpotifyTokenExpired'
+        '502':
+          $ref: '#/components/responses/SpotifyUnavailable'
+
+  # ─── Spotify Public ────────────────────────────────────────────────────────
+
+  /api/v1/spotify/search/artists:
+    get:
+      tags: [Spotify (Public)]
+      summary: Search for artists
+      operationId: searchArtists
+      security: []
+      parameters:
+        - name: query
+          in: query
+          required: true
+          schema:
+            type: string
+          example: Coldplay
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 50
+            default: 20
+        - name: offset
+          in: query
+          schema:
+            type: integer
+            minimum: 0
+            default: 0
+      responses:
+        '200':
+          description: Artist search results
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ArtistSearchResult'
+        '400':
+          $ref: '#/components/responses/InvalidArgument'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/v1/spotify/search/tracks:
+    get:
+      tags: [Spotify (Public)]
+      summary: Search for tracks
+      operationId: searchTracks
+      security: []
+      parameters:
+        - name: query
+          in: query
+          required: true
+          schema:
+            type: string
+          example: Bohemian Rhapsody
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 50
+            default: 20
+        - name: offset
+          in: query
+          schema:
+            type: integer
+            minimum: 0
+            default: 0
+      responses:
+        '200':
+          description: Track search results
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TrackSearchResult'
+        '400':
+          $ref: '#/components/responses/InvalidArgument'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/v1/spotify/genres:
+    get:
+      tags: [Spotify (Public)]
+      summary: Get all available Spotify genre seeds
+      operationId: getAvailableGenres
+      security: []
+      responses:
+        '200':
+          description: List of available genre strings
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: string
+              example: [acoustic, afrobeat, alt-rock, alternative, ambient, blues, classical, country, dance, electronic, folk, hip-hop, indie, jazz, metal, pop, punk, r-n-b, reggae, rock]
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/v1/spotify/artists/{artistId}:
+    get:
+      tags: [Spotify (Public)]
+      summary: Get artist details by Spotify ID
+      operationId: getArtistById
+      security: []
+      parameters:
+        - name: artistId
+          in: path
+          required: true
+          schema:
+            type: string
+          example: 4gzpq5DuGXgMSoJzLEbfR
+      responses:
+        '200':
+          description: Artist details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SpotifyArtist'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+# ─── Components ──────────────────────────────────────────────────────────────
+
+components:
+
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        JWT with claims: `{ userId, tokenVersion, sub, iat, exp }`.
+        `tokenVersion` is required — tokens without it are rejected with 401.
+
+  # ─── Responses ─────────────────────────────────────────────────────────────
+
+  responses:
+
+    ValidationError:
+      description: Request body failed validation
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            code: VALIDATION_ERROR
+            message: Validation failed
+            fields:
+              email: must not be blank
+              password: Password must contain at least one uppercase letter, one lowercase letter, one number, and one special character
+            timestamp: '2026-05-12T10:15:30.123Z'
+
+    InvalidArgument:
+      description: Invalid query parameter or illegal request state
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            code: INVALID_ARGUMENT
+            message: Invalid status parameter. Allowed values active, all
+            timestamp: '2026-05-12T10:15:30.123Z'
+
+    InvalidToken:
+      description: Expired or malformed verification/reset token
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            code: INVALID_TOKEN
+            message: Token is expired or invalid
+            timestamp: '2026-05-12T10:15:30.123Z'
+
+    Unauthorized:
+      description: Missing or invalid JWT, or wrong credentials
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            code: UNAUTHORIZED
+            message: Invalid email or password
+            timestamp: '2026-05-12T10:15:30.123Z'
+
+    Forbidden:
+      description: Authenticated but not authorized for this action
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            code: FORBIDDEN
+            message: Access denied
+            timestamp: '2026-05-12T10:15:30.123Z'
+
+    EmailExists:
+      description: Email address already registered
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            code: EMAIL_EXISTS
+            message: An account with this email already exists
+            timestamp: '2026-05-12T10:15:30.123Z'
+
+    Conflict:
+      description: Resource conflict — Spotify already connected or generic data conflict
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            code: CONFLICT
+            message: A conflict occurred. The resource may already exist.
+            timestamp: '2026-05-12T10:15:30.123Z'
+
+    DuplicateSwipe:
+      description: User has already swiped on this person
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            code: DUPLICATE_SWIPE
+            message: You have already swiped on this user
+            timestamp: '2026-05-12T10:15:30.123Z'
+
+    AccountLocked:
+      description: Too many failed login attempts
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            code: ACCOUNT_LOCKED
+            message: Account is temporarily locked due to too many failed login attempts
+            timestamp: '2026-05-12T10:15:30.123Z'
+
+    NotFound:
+      description: Requested resource not found
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            code: NOT_FOUND
+            message: User not found
+            timestamp: '2026-05-12T10:15:30.123Z'
+
+    RateLimited:
+      description: Rate limit exceeded
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            code: ACCOUNT_LOCKED
+            message: Too many requests. Please slow down.
+            timestamp: '2026-05-12T10:15:30.123Z'
+
+    SpotifyTokenExpired:
+      description: Spotify refresh token revoked — user must re-authenticate with Spotify
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            code: SPOTIFY_TOKEN_EXPIRED
+            message: Spotify authorization has been revoked. Please re-connect your Spotify account.
+            timestamp: '2026-05-12T10:15:30.123Z'
+
+    SpotifyUnavailable:
+      description: Spotify API error or circuit breaker open
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            code: SPOTIFY_UNAVAILABLE
+            message: Spotify service is temporarily unavailable
+            timestamp: '2026-05-12T10:15:30.123Z'
+
+    InternalError:
+      description: Unexpected server error
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            code: INTERNAL_ERROR
+            message: An unexpected error occurred
+            timestamp: '2026-05-12T10:15:30.123Z'
+
+  # ─── Schemas ───────────────────────────────────────────────────────────────
+
+  schemas:
+
+    # ── Enums ──────────────────────────────────────────────────────────────
+
+    Gender:
+      type: string
+      enum: [MALE, FEMALE, NON_BINARY, OTHER, PREFER_NOT_TO_SAY]
+
+    SexualOrientation:
+      type: string
+      enum: [STRAIGHT, GAY, LESBIAN, BISEXUAL, PANSEXUAL, ASEXUAL, DEMISEXUAL, QUEER, QUESTIONING, OTHER]
+
+    RegistrationStage:
+      type: string
+      enum:
+        - STARTED
+        - BASIC_PROFILE
+        - LOCATION_INFO
+        - PHOTOS
+        - MUSIC_PREFERENCES
+        - LIFESTYLE
+        - PERSONALITY
+        - DATING_PREFERENCES
+        - PRIVACY_SETTINGS
+        - FINISHED
+
+    RelationshipGoal:
+      type: string
+      enum: [CASUAL_DATING, SERIOUS_RELATIONSHIP, FRIENDSHIP, SOMETHING_CASUAL, MARRIAGE, FIGURING_IT_OUT, PREFER_NOT_TO_SAY]
+
+    RelationshipStatus:
+      type: string
+      enum: [SINGLE, DIVORCED, WIDOWED, SEPARATED, PREFER_NOT_TO_SAY]
+
+    KidsPreference:
+      type: string
+      enum: [WANTS_KIDS, DOESNT_WANT_KIDS, HAS_KIDS, HAS_KIDS_WANTS_MORE, HAS_KIDS_DOESNT_WANT_MORE, OPEN_TO_KIDS, NOT_SURE, PREFER_NOT_TO_SAY]
+
+    SmokingHabits:
+      type: string
+      enum: [NON_SMOKER, SOCIAL_SMOKER, REGULAR_SMOKER, TRYING_TO_QUIT, PREFER_NOT_TO_SAY]
+
+    DrinkingHabits:
+      type: string
+      enum: [NON_DRINKER, SOCIAL_DRINKER, MODERATE_DRINKER, REGULAR_DRINKER, PREFER_NOT_TO_SAY]
+
+    ExerciseFrequency:
+      type: string
+      enum: [NEVER, RARELY, ONCE_A_WEEK, FEW_TIMES_A_WEEK, DAILY, MULTIPLE_TIMES_DAILY]
+
+    EducationLevel:
+      type: string
+      enum: [HIGH_SCHOOL, SOME_COLLEGE, ASSOCIATES_DEGREE, BACHELORS_DEGREE, MASTERS_DEGREE, DOCTORATE, TRADE_SCHOOL, PREFER_NOT_TO_SAY]
+
+    MBTI:
+      type: string
+      enum: [ISFJ, ISFP, ISTJ, ISTP, INFJ, INFP, INTJ, INTP, ESFJ, ESFP, ESTJ, ESTP, ENFJ, ENFP, ENTJ, ENTP]
+
+    ConcertFrequency:
+      type: string
+      enum: [NEVER, RARELY, FEW_TIMES_A_YEAR, MONTHLY, WEEKLY, MULTIPLE_TIMES_A_WEEK]
+
+    MusicImportance:
+      type: string
+      enum: [NOT_IMPORTANT, SOMEWHAT_IMPORTANT, IMPORTANT, VERY_IMPORTANT, LIFE_IS_MUSIC]
+
+    Religion:
+      type: string
+      enum: [CHRISTIAN, MUSLIM, JEWISH, HINDU, BUDDHIST, SIKH, ATHEIST, AGNOSTIC, SPIRITUAL, OTHER, PREFER_NOT_TO_SAY]
+
+    PoliticalViews:
+      type: string
+      enum: [LIBERAL, PROGRESSIVE, MODERATE, CONSERVATIVE, LIBERTARIAN, SOCIALIST, APOLITICAL, OTHER, PREFER_NOT_TO_SAY]
+
+    MatchStatus:
+      type: string
+      description: Serialized as lowercase in JSON
+      enum: [active, unmatched, deleted, blocked]
+
+    MatchSource:
+      type: string
+      description: Serialized as lowercase in JSON
+      enum: [mutual_swipe, algorithm_boost, super_like]
+
+    GenrePreferenceSource:
+      type: string
+      description: Serialized as lowercase in JSON
+      enum: [spotify_derived, manual_selection, inferred, hybrid, seed_data]
+
+    CompatibilityLevel:
+      type: string
+      enum: [LOW, MEDIUM, HIGH, VERY_HIGH]
+      description: LOW=0-40, MEDIUM=41-60, HIGH=61-80, VERY_HIGH=81-100
+
+    # ── Error ──────────────────────────────────────────────────────────────
+
+    ErrorResponse:
+      type: object
+      required: [code, message, timestamp]
+      properties:
+        code:
+          type: string
+          description: Machine-readable error code. Always switch on this, never on message.
+          example: VALIDATION_ERROR
+          enum:
+            - VALIDATION_ERROR
+            - INVALID_ARGUMENT
+            - INVALID_TOKEN
+            - UNAUTHORIZED
+            - FORBIDDEN
+            - ACCOUNT_LOCKED
+            - NOT_FOUND
+            - EMAIL_EXISTS
+            - CONFLICT
+            - DUPLICATE_SWIPE
+            - CONCURRENT_MODIFICATION
+            - SPOTIFY_TOKEN_EXPIRED
+            - SPOTIFY_UNAVAILABLE
+            - INTERNAL_ERROR
+        message:
+          type: string
+          description: Human-readable description
+        fields:
+          type: object
+          nullable: true
+          description: Per-field validation messages. Only present for VALIDATION_ERROR.
+          additionalProperties:
+            type: string
+          example:
+            email: must not be blank
+        timestamp:
+          type: string
+          format: date-time
+          description: ISO 8601 timestamp
+
+    # ── Auth ───────────────────────────────────────────────────────────────
+
+    RegisterRequest:
+      type: object
+      required: [email, name, password]
+      properties:
+        email:
+          type: string
+          format: email
+          example: alice@example.com
+        name:
+          type: string
+          minLength: 2
+          maxLength: 100
+          example: Alice Smith
+        password:
+          type: string
+          minLength: 8
+          maxLength: 128
+          description: Must contain uppercase, lowercase, digit, and special character (@$!%*?&#)
+          example: Secret@123
+
+    LoginRequest:
+      type: object
+      required: [email, password]
+      properties:
+        email:
+          type: string
+          format: email
+          example: alice@example.com
+        password:
+          type: string
+          example: Secret@123
+
+    SpotifyLoginRequest:
+      type: object
+      required: [spotifyId, email, name, spotifyAccessToken, spotifyRefreshToken, spotifyTokenExpiresAt]
+      properties:
+        spotifyId:
+          type: string
+          example: spotify:user:alice123
+        email:
+          type: string
+          format: email
+          example: alice@example.com
+        name:
+          type: string
+          example: Alice Smith
+        spotifyAccessToken:
+          type: string
+          example: BQD...token
+        spotifyRefreshToken:
+          type: string
+          example: AQD...refresh
+        spotifyTokenExpiresAt:
+          type: integer
+          format: int64
+          description: Epoch milliseconds
+          example: 1747000000000
+        imageUrl:
+          type: string
+          format: uri
+          nullable: true
+          example: https://i.scdn.co/image/abc123
+
+    EmailVerificationRequest:
+      type: object
+      required: [token]
+      properties:
+        token:
+          type: string
+          example: eyJhbGciOiJIUzI1NiJ9...
+
+    EmailRequest:
+      type: object
+      required: [email]
+      properties:
+        email:
+          type: string
+          format: email
+          example: alice@example.com
+
+    ResetPasswordRequest:
+      type: object
+      required: [token, newPassword]
+      properties:
+        token:
+          type: string
+        newPassword:
+          type: string
+          minLength: 8
+          maxLength: 128
+          description: Same rules as registration password
+          example: NewSecret@456
+
+    ConnectSpotifyRequest:
+      type: object
+      required: [spotifyId, spotifyAccessToken, spotifyRefreshToken, spotifyTokenExpiresAt]
+      properties:
+        spotifyId:
+          type: string
+          maxLength: 255
+          example: spotify:user:alice123
+        spotifyAccessToken:
+          type: string
+          maxLength: 2048
+        spotifyRefreshToken:
+          type: string
+          maxLength: 2048
+        spotifyTokenExpiresAt:
+          type: integer
+          format: int64
+          description: Epoch milliseconds
+          example: 1747000000000
+
+    AuthResponse:
+      type: object
+      properties:
+        token:
+          type: string
+          description: JWT for subsequent requests
+          example: eyJhbGciOiJIUzI1NiJ9...
+        userId:
+          type: string
+          format: uuid
+          example: 550e8400-e29b-41d4-a716-446655440000
+        email:
+          type: string
+          format: email
+          example: alice@example.com
+        name:
+          type: string
+          example: Alice Smith
+        registrationStage:
+          $ref: '#/components/schemas/RegistrationStage'
+        emailVerified:
+          type: boolean
+          example: false
+        authProvider:
+          type: string
+          enum: [EMAIL, SPOTIFY]
+          example: EMAIL
+
+    DeleteAccountRequest:
+      type: object
+      properties:
+        password:
+          type: string
+          nullable: true
+          description: Required for EMAIL auth users; Spotify-only users may omit
+          example: Secret@123
+
+    # ── Onboarding Requests ────────────────────────────────────────────────
+
+    BasicProfileRequest:
+      type: object
+      required: [name, dateOfBirth, gender, sexualOrientation]
+      properties:
+        name:
+          type: string
+          example: Alice Smith
+        dateOfBirth:
+          type: string
+          format: date
+          description: Must be 18+ years old
+          example: '1997-04-15'
+        gender:
+          $ref: '#/components/schemas/Gender'
+        sexualOrientation:
+          $ref: '#/components/schemas/SexualOrientation'
+
+    LocationRequest:
+      type: object
+      properties:
+        latitude:
+          type: number
+          format: double
+          nullable: true
+          example: 45.8150
+        longitude:
+          type: number
+          format: double
+          nullable: true
+          example: 15.9819
+        locationCity:
+          type: string
+          nullable: true
+          example: Zagreb
+        locationCountry:
+          type: string
+          nullable: true
+          example: Croatia
+
+    PhotosRequest:
+      type: object
+      required: [photos]
+      properties:
+        photos:
+          type: array
+          minItems: 1
+          maxItems: 6
+          items:
+            $ref: '#/components/schemas/PhotoItem'
+
+    PhotoItem:
+      type: object
+      required: [imageUrl, displayOrder, isPrimary]
+      properties:
+        imageUrl:
+          type: string
+          format: uri
+          example: https://cdn.example.com/photos/alice1.jpg
+        displayOrder:
+          type: integer
+          minimum: 0
+          example: 0
+        isPrimary:
+          type: boolean
+          example: true
+        caption:
+          type: string
+          maxLength: 255
+          nullable: true
+          example: Summer festival 2024
+
+    MusicPreferencesRequest:
+      type: object
+      required: [favoriteGenres, concertFrequency, musicImportance, openToNewGenres]
+      properties:
+        favoriteGenres:
+          type: array
+          items:
+            type: string
+          example: [pop, indie-rock, alternative]
+        concertFrequency:
+          $ref: '#/components/schemas/ConcertFrequency'
+        musicImportance:
+          $ref: '#/components/schemas/MusicImportance'
+        favoriteDecades:
+          type: array
+          nullable: true
+          items:
+            type: string
+          example: ['90s', '2000s']
+        openToNewGenres:
+          type: boolean
+          example: true
+        listeningTimes:
+          type: array
+          nullable: true
+          items:
+            type: string
+          example: [morning, evening]
+        hoursPerDay:
+          type: number
+          format: double
+          minimum: 0
+          maximum: 24
+          nullable: true
+          example: 3.5
+
+    LifestyleRequest:
+      type: object
+      required: [relationshipStatus]
+      properties:
+        education:
+          $ref: '#/components/schemas/EducationLevel'
+        occupation:
+          type: string
+          nullable: true
+          example: Software Engineer
+        relationshipStatus:
+          $ref: '#/components/schemas/RelationshipStatus'
+        wantsKids:
+          $ref: '#/components/schemas/KidsPreference'
+        smokingHabits:
+          $ref: '#/components/schemas/SmokingHabits'
+        drinkingHabits:
+          $ref: '#/components/schemas/DrinkingHabits'
+        exerciseFrequency:
+          $ref: '#/components/schemas/ExerciseFrequency'
+        religion:
+          $ref: '#/components/schemas/Religion'
+        politicalViews:
+          $ref: '#/components/schemas/PoliticalViews'
+
+    PersonalityRequest:
+      type: object
+      required: [bio]
+      properties:
+        bio:
+          type: string
+          maxLength: 500
+          example: Music lover who hikes on weekends and goes to concerts monthly.
+        interests:
+          type: array
+          nullable: true
+          items:
+            type: string
+          example: [hiking, cooking, concerts, photography]
+        mbti:
+          $ref: '#/components/schemas/MBTI'
+        lookingForText:
+          type: string
+          maxLength: 500
+          nullable: true
+          example: Someone who loves live music as much as I do.
+        favoriteQuote:
+          type: string
+          maxLength: 300
+          nullable: true
+          example: Music gives a soul to the universe.
+        conversationStarters:
+          type: string
+          maxLength: 500
+          nullable: true
+          example: What was the last concert you went to?
+
+    DatingPreferencesRequest:
+      type: object
+      required: [minAge, maxAge, maxDistanceKm, interestedInGenders, relationshipGoal]
+      properties:
+        minAge:
+          type: integer
+          minimum: 18
+          example: 22
+        maxAge:
+          type: integer
+          maximum: 100
+          example: 35
+        maxDistanceKm:
+          type: integer
+          minimum: 1
+          example: 50
+        interestedInGenders:
+          type: array
+          items:
+            $ref: '#/components/schemas/Gender'
+          example: [MALE, NON_BINARY]
+        relationshipGoal:
+          $ref: '#/components/schemas/RelationshipGoal'
+        dealBreakers:
+          type: array
+          nullable: true
+          items:
+            type: string
+          example: [smoking, wants_kids]
+        showMe:
+          type: string
+          nullable: true
+          example: everyone
+        musicMatchImportance:
+          type: number
+          format: double
+          minimum: 0
+          maximum: 100
+          nullable: true
+          example: 70
+
+    PrivacySettingsRequest:
+      type: object
+      required: [isProfilePublic, showAge, showDistance, showLastActive, discoverable, showSpotifyProfile, showMusicStats, readReceipts]
+      properties:
+        isProfilePublic:
+          type: boolean
+          example: true
+        showAge:
+          type: boolean
+          example: true
+        showDistance:
+          type: boolean
+          example: true
+        showLastActive:
+          type: boolean
+          example: false
+        discoverable:
+          type: boolean
+          example: true
+        showLikedByYou:
+          type: boolean
+          nullable: true
+          example: false
+        showSpotifyProfile:
+          type: boolean
+          example: true
+        showMusicStats:
+          type: boolean
+          example: true
+        incognitoMode:
+          type: boolean
+          nullable: true
+          example: false
+        readReceipts:
+          type: boolean
+          example: true
+
+    # ── Onboarding Responses ───────────────────────────────────────────────
+
+    UserDtoResponse:
+      type: object
+      description: Lean user response returned by all onboarding PUT endpoints
+      properties:
+        id:
+          type: string
+          format: uuid
+          example: 550e8400-e29b-41d4-a716-446655440000
+        name:
+          type: string
+          example: Alice Smith
+        email:
+          type: string
+          format: email
+          example: alice@example.com
+        imageUrl:
+          type: string
+          format: uri
+          nullable: true
+        latitude:
+          type: number
+          format: double
+          nullable: true
+          example: 45.8150
+        longitude:
+          type: number
+          format: double
+          nullable: true
+          example: 15.9819
+        city:
+          type: string
+          nullable: true
+          example: Zagreb
+        country:
+          type: string
+          nullable: true
+          example: Croatia
+        registrationStage:
+          $ref: '#/components/schemas/RegistrationStage'
+        gender:
+          $ref: '#/components/schemas/Gender'
+        dateOfBirth:
+          type: string
+          format: date
+          nullable: true
+          example: '1997-04-15'
+        sexualOrientation:
+          $ref: '#/components/schemas/SexualOrientation'
+
+    PhotoResponse:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        imageUrl:
+          type: string
+          format: uri
+          example: https://cdn.example.com/photos/alice1.jpg
+        displayOrder:
+          type: integer
+          example: 0
+        isPrimary:
+          type: boolean
+          example: true
+        caption:
+          type: string
+          nullable: true
+
+    MusicPreferencesResponse:
+      type: object
+      properties:
+        favoriteGenres:
+          type: array
+          items:
+            type: string
+        concertFrequency:
+          $ref: '#/components/schemas/ConcertFrequency'
+        musicImportance:
+          $ref: '#/components/schemas/MusicImportance'
+        favoriteDecades:
+          type: array
+          nullable: true
+          items:
+            type: string
+        openToNewGenres:
+          type: boolean
+        listeningTimes:
+          type: array
+          nullable: true
+          items:
+            type: string
+        hoursPerDay:
+          type: number
+          nullable: true
+
+    LifestyleResponse:
+      type: object
+      properties:
+        education:
+          $ref: '#/components/schemas/EducationLevel'
+        occupation:
+          type: string
+          nullable: true
+        company:
+          type: string
+          nullable: true
+          deprecated: true
+        relationshipStatus:
+          $ref: '#/components/schemas/RelationshipStatus'
+        wantsKids:
+          $ref: '#/components/schemas/KidsPreference'
+        smokingHabits:
+          $ref: '#/components/schemas/SmokingHabits'
+        drinkingHabits:
+          $ref: '#/components/schemas/DrinkingHabits'
+        exerciseFrequency:
+          $ref: '#/components/schemas/ExerciseFrequency'
+        religion:
+          $ref: '#/components/schemas/Religion'
+        politicalViews:
+          $ref: '#/components/schemas/PoliticalViews'
+
+    PersonalityResponse:
+      type: object
+      properties:
+        bio:
+          type: string
+        interests:
+          type: array
+          nullable: true
+          items:
+            type: string
+        mbti:
+          $ref: '#/components/schemas/MBTI'
+        lookingForText:
+          type: string
+          nullable: true
+        favoriteQuote:
+          type: string
+          nullable: true
+        conversationStarters:
+          type: string
+          nullable: true
+
+    DatingPreferencesResponse:
+      type: object
+      properties:
+        minAge:
+          type: integer
+        maxAge:
+          type: integer
+        maxDistanceKm:
+          type: integer
+        interestedInGenders:
+          type: array
+          items:
+            $ref: '#/components/schemas/Gender'
+        relationshipGoal:
+          $ref: '#/components/schemas/RelationshipGoal'
+        dealBreakers:
+          type: array
+          nullable: true
+          items:
+            type: string
+        showMe:
+          type: string
+          nullable: true
+        musicMatchImportance:
+          type: number
+          nullable: true
+
+    PrivacySettingsResponse:
+      type: object
+      properties:
+        isProfilePublic:
+          type: boolean
+        showAge:
+          type: boolean
+        showDistance:
+          type: boolean
+        showLastActive:
+          type: boolean
+        discoverable:
+          type: boolean
+        showLikedByYou:
+          type: boolean
+          nullable: true
+        showSpotifyProfile:
+          type: boolean
+        showMusicStats:
+          type: boolean
+        incognitoMode:
+          type: boolean
+          nullable: true
+        readReceipts:
+          type: boolean
+
+    OnboardingProgressResponse:
+      type: object
+      properties:
+        currentStage:
+          $ref: '#/components/schemas/RegistrationStage'
+        completionPercentage:
+          type: number
+          format: double
+          example: 55.0
+        stepsCompleted:
+          type: object
+          additionalProperties:
+            type: boolean
+          example:
+            basicInfo: true
+            location: true
+            photos: false
+            musicPreferences: false
+        nextStep:
+          type: string
+          nullable: true
+          example: photos
+
+    CompleteProfileResponse:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        email:
+          type: string
+          format: email
+        name:
+          type: string
+        dateOfBirth:
+          type: string
+          format: date
+          nullable: true
+        age:
+          type: integer
+          nullable: true
+        gender:
+          $ref: '#/components/schemas/Gender'
+        sexualOrientation:
+          $ref: '#/components/schemas/SexualOrientation'
+        registrationStage:
+          $ref: '#/components/schemas/RegistrationStage'
+        locationCity:
+          type: string
+          nullable: true
+        locationCountry:
+          type: string
+          nullable: true
+        latitude:
+          type: number
+          format: double
+          nullable: true
+        longitude:
+          type: number
+          format: double
+          nullable: true
+        photos:
+          type: array
+          items:
+            $ref: '#/components/schemas/PhotoResponse'
+        primaryPhotoUrl:
+          type: string
+          format: uri
+          nullable: true
+        musicPreferences:
+          $ref: '#/components/schemas/MusicPreferencesResponse'
+        lifestyle:
+          $ref: '#/components/schemas/LifestyleResponse'
+        personality:
+          $ref: '#/components/schemas/PersonalityResponse'
+        datingPreferences:
+          $ref: '#/components/schemas/DatingPreferencesResponse'
+        privacySettings:
+          $ref: '#/components/schemas/PrivacySettingsResponse'
+        progress:
+          $ref: '#/components/schemas/OnboardingProgressResponse'
+
+    # ── Matching ───────────────────────────────────────────────────────────
+
+    PotentialMatchPage:
+      type: object
+      properties:
+        matches:
+          type: array
+          items:
+            $ref: '#/components/schemas/PotentialMatch'
+        total:
+          type: integer
+          example: 42
+        limit:
+          type: integer
+          example: 20
+        offset:
+          type: integer
+          example: 0
+        hasMore:
+          type: boolean
+          example: true
+
+    PotentialMatch:
+      type: object
+      properties:
+        userId:
+          type: string
+          format: uuid
+          example: 550e8400-e29b-41d4-a716-446655440001
+        name:
+          type: string
+          example: Bob Jones
+        age:
+          type: integer
+          nullable: true
+          example: 27
+        matchScore:
+          type: number
+          format: double
+          description: Compatibility score 0–100
+          example: 82.5
+        topSharedGenres:
+          type: array
+          maxItems: 3
+          items:
+            type: string
+          example: [indie-rock, alternative, pop]
+        previewInsight:
+          type: string
+          nullable: true
+          example: You both love indie-rock and attended concerts recently
+        distance:
+          type: number
+          format: double
+          nullable: true
+          description: Distance in km
+          example: 12.3
+        photos:
+          type: array
+          description: All photo URLs sorted by displayOrder
+          items:
+            type: string
+            format: uri
+        sharedGenreCount:
+          type: integer
+          example: 3
+        compatibilityLevel:
+          $ref: '#/components/schemas/CompatibilityLevel'
+
+    SharedGenre:
+      type: object
+      properties:
+        genre:
+          type: string
+          example: indie-rock
+        genreDisplayName:
+          type: string
+          example: Indie Rock
+        userWeight:
+          type: number
+          format: double
+          description: Requesting user's weight for this genre (0–1)
+          example: 0.85
+        otherWeight:
+          type: number
+          format: double
+          description: Other user's weight for this genre (0–1)
+          example: 0.72
+        overlap:
+          type: number
+          format: double
+          description: min(userWeight, otherWeight)
+          example: 0.72
+        similarity:
+          type: number
+          format: double
+          description: 1.0 = identical weights, 0.0 = very different
+          example: 0.85
+
+    MatchBreakdown:
+      type: object
+      properties:
+        sharedGenres:
+          type: array
+          items:
+            $ref: '#/components/schemas/SharedGenre'
+        userOnlyGenres:
+          type: array
+          items:
+            type: string
+        otherOnlyGenres:
+          type: array
+          items:
+            type: string
+        sharedGenreCount:
+          type: integer
+          example: 3
+        totalUniqueGenres:
+          type: integer
+          example: 8
+        genreOverlapScore:
+          type: number
+          format: double
+          example: 75.0
+        weightSimilarityScore:
+          type: number
+          format: double
+          example: 68.0
+        diversityScore:
+          type: number
+          format: double
+          example: 55.0
+        matchConfidence:
+          type: number
+          format: double
+          example: 0.8
+        sharedInterests:
+          type: array
+          items:
+            type: string
+          example: [hiking, concerts]
+        lifestyleCompatibilityScore:
+          type: number
+          format: double
+          example: 80.0
+
+    MatchScore:
+      type: object
+      properties:
+        userId:
+          type: string
+          format: uuid
+        otherUserId:
+          type: string
+          format: uuid
+        overallScore:
+          type: number
+          format: double
+          description: 0–100
+          example: 78.4
+        musicScore:
+          type: number
+          format: double
+          description: 0–100
+          example: 85.0
+        lifestyleScore:
+          type: number
+          format: double
+          description: 0–100
+          example: 72.0
+        interestsScore:
+          type: number
+          format: double
+          description: 0–100
+          example: 65.0
+        locationScore:
+          type: number
+          format: double
+          description: 0–100
+          example: 90.0
+        behavioralScore:
+          type: number
+          format: double
+          nullable: true
+          description: 0–100; null during cold start (fewer than 5 likes)
+          example: 70.0
+        breakdown:
+          $ref: '#/components/schemas/MatchBreakdown'
+        insights:
+          type: array
+          items:
+            type: string
+          example:
+            - You share 3 genres including indie-rock and alternative
+            - Both value concerts highly
+        compatibilityLevel:
+          $ref: '#/components/schemas/CompatibilityLevel'
+        calculatedAt:
+          type: string
+          format: date-time
+          example: '2026-05-12T10:15:30.000Z'
+
+    SwipeRequest:
+      type: object
+      required: [swipedUserId, action]
+      properties:
+        swipedUserId:
+          type: string
+          format: uuid
+          example: 550e8400-e29b-41d4-a716-446655440001
+        action:
+          type: string
+          enum: [like, pass, super_like, block]
+          example: like
+        matchScore:
+          type: number
+          format: double
+          nullable: true
+          deprecated: true
+          description: Deprecated — server computes the score internally; field is silently ignored
+        platform:
+          type: string
+          maxLength: 50
+          nullable: true
+          enum: [web, ios, android]
+          default: web
+
+    SwipeResult:
+      type: object
+      properties:
+        swipeId:
+          type: string
+          format: uuid
+        action:
+          type: string
+          enum: [like, pass, super_like, block]
+          example: like
+        matchScore:
+          type: number
+          format: double
+          description: Server-computed score at swipe time
+          example: 78.4
+        resultedInMatch:
+          type: boolean
+          example: false
+        match:
+          $ref: '#/components/schemas/SwipeMatchDetails'
+          nullable: true
+          description: Only present when resultedInMatch=true
+
+    SwipeMatchDetails:
+      type: object
+      properties:
+        matchId:
+          type: string
+          format: uuid
+        userId:
+          type: string
+          format: uuid
+          description: The other user's ID
+        name:
+          type: string
+          example: Bob Jones
+        matchScore:
+          type: number
+          format: double
+          example: 78.4
+        matchedAt:
+          type: string
+          format: date-time
+          example: '2026-05-12T10:16:00.000Z'
+
+    MatchResponseDto:
+      type: object
+      properties:
+        matchId:
+          type: string
+          format: uuid
+        matchScore:
+          type: number
+          format: double
+          nullable: true
+          description: Directional score from the requesting user's perspective; null if not yet computed
+          example: 78.4
+        status:
+          $ref: '#/components/schemas/MatchStatus'
+        conversationStarted:
+          type: boolean
+          example: false
+        matchSource:
+          $ref: '#/components/schemas/MatchSource'
+        matchedAt:
+          type: string
+          format: date-time
+        otherUserId:
+          type: string
+          format: uuid
+        otherUserName:
+          type: string
+          example: Bob Jones
+        otherUserPhoto:
+          type: string
+          format: uri
+          nullable: true
+
+    MatchPageResponse:
+      type: object
+      properties:
+        matches:
+          type: array
+          items:
+            $ref: '#/components/schemas/MatchResponseDto'
+        total:
+          type: integer
+          format: int64
+          example: 7
+        limit:
+          type: integer
+          example: 20
+        offset:
+          type: integer
+          example: 0
+        hasMore:
+          type: boolean
+          example: false
+
+    AnalyticsResponse:
+      type: object
+      properties:
+        totalSwipes:
+          type: integer
+          format: int64
+          example: 150
+        totalLikes:
+          type: integer
+          format: int64
+          example: 90
+        totalPasses:
+          type: integer
+          format: int64
+          example: 60
+        totalMatches:
+          type: integer
+          format: int64
+          example: 12
+        swipeThroughRate:
+          type: number
+          format: double
+          nullable: true
+          description: likes / totalSwipes; null if no swipes
+          example: 0.60
+        matchRate:
+          type: number
+          format: double
+          nullable: true
+          description: matches / likes; null if no likes
+          example: 0.13
+
+    # ── Genre Preferences ──────────────────────────────────────────────────
+
+    GenrePreferenceItem:
+      type: object
+      properties:
+        genreName:
+          type: string
+          example: indie-rock
+        genreDisplayName:
+          type: string
+          example: Indie Rock
+        weight:
+          type: number
+          format: double
+          description: 0.0–1.0
+          example: 0.85
+        confidence:
+          type: number
+          format: double
+          example: 0.9
+        source:
+          $ref: '#/components/schemas/GenrePreferenceSource'
+        rank:
+          type: integer
+          example: 1
+        updatedAt:
+          type: string
+          format: date-time
+        createdAt:
+          type: string
+          format: date-time
+
+    GenrePreferenceListResponse:
+      type: object
+      properties:
+        total:
+          type: integer
+          example: 12
+        preferences:
+          type: array
+          items:
+            $ref: '#/components/schemas/GenrePreferenceItem'
+
+    AddGenrePreferenceRequest:
+      type: object
+      required: [genreName]
+      properties:
+        genreName:
+          type: string
+          example: indie-rock
+        weight:
+          type: number
+          format: double
+          minimum: 0.0
+          maximum: 1.0
+          default: 1.0
+          nullable: true
+
+    GenrePreferenceCreateResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+          example: true
+        message:
+          type: string
+          example: Genre preference added
+        preference:
+          $ref: '#/components/schemas/GenrePreferenceItem'
+
+    GenreSyncResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+          example: true
+        message:
+          type: string
+          example: Genre preferences synced successfully
+        genreCount:
+          type: integer
+          example: 12
+
+    # ── Account / Users ────────────────────────────────────────────────────
+
+    UserProfileResponse:
+      type: object
+      description: |
+        Public profile. Privacy-gated fields are null for non-owners when the corresponding
+        privacy setting is disabled.
+      properties:
+        userId:
+          type: string
+          format: uuid
+        name:
+          type: string
+          example: Bob Jones
+        age:
+          type: integer
+          nullable: true
+          description: Null for non-owners when showAge=false
+          example: 27
+        gender:
+          $ref: '#/components/schemas/Gender'
+        locationCity:
+          type: string
+          nullable: true
+          example: Zagreb
+        locationCountry:
+          type: string
+          nullable: true
+          example: Croatia
+        photos:
+          type: array
+          description: Sorted by displayOrder
+          items:
+            type: string
+            format: uri
+        bio:
+          type: string
+          nullable: true
+        interests:
+          type: string
+          nullable: true
+        mbti:
+          $ref: '#/components/schemas/MBTI'
+        lookingForText:
+          type: string
+          nullable: true
+        favoriteQuote:
+          type: string
+          nullable: true
+        conversationStarters:
+          type: string
+          nullable: true
+        education:
+          $ref: '#/components/schemas/EducationLevel'
+        occupation:
+          type: string
+          nullable: true
+        smokingHabits:
+          $ref: '#/components/schemas/SmokingHabits'
+        drinkingHabits:
+          $ref: '#/components/schemas/DrinkingHabits'
+        exerciseFrequency:
+          $ref: '#/components/schemas/ExerciseFrequency'
+        wantsKids:
+          $ref: '#/components/schemas/KidsPreference'
+        religion:
+          $ref: '#/components/schemas/Religion'
+
+    # ── Spotify (Authenticated) ────────────────────────────────────────────
+
+    SpotifyUserProfile:
+      type: object
+      description: Spotify user profile data
+      properties:
+        id:
+          type: string
+          example: spotify:user:alice123
+        display_name:
+          type: string
+          example: Alice Smith
+        email:
+          type: string
+          format: email
+        images:
+          type: array
+          items:
+            type: object
+            properties:
+              url:
+                type: string
+                format: uri
+              height:
+                type: integer
+              width:
+                type: integer
+        followers:
+          type: object
+          properties:
+            total:
+              type: integer
+        country:
+          type: string
+          example: HR
+        product:
+          type: string
+          description: Spotify subscription tier
+          example: premium
+
+    SpotifyArtist:
+      type: object
+      properties:
+        id:
+          type: string
+          example: 4gzpq5DuGXgMSoJzLEbfR
+        name:
+          type: string
+          example: Radiohead
+        genres:
+          type: array
+          items:
+            type: string
+          example: [alternative rock, art rock]
+        popularity:
+          type: integer
+          minimum: 0
+          maximum: 100
+          example: 78
+        images:
+          type: array
+          items:
+            type: object
+            properties:
+              url:
+                type: string
+                format: uri
+              height:
+                type: integer
+              width:
+                type: integer
+        external_urls:
+          type: object
+          properties:
+            spotify:
+              type: string
+              format: uri
+        followers:
+          type: object
+          properties:
+            total:
+              type: integer
+
+    SpotifyTrack:
+      type: object
+      properties:
+        id:
+          type: string
+          example: 7tFiyTwD0nx5a1eklYtX2J
+        name:
+          type: string
+          example: Creep
+        artists:
+          type: array
+          items:
+            type: object
+            properties:
+              id:
+                type: string
+              name:
+                type: string
+        album:
+          type: object
+          properties:
+            id:
+              type: string
+            name:
+              type: string
+            images:
+              type: array
+              items:
+                type: object
+                properties:
+                  url:
+                    type: string
+                    format: uri
+        duration_ms:
+          type: integer
+          example: 238000
+        popularity:
+          type: integer
+          example: 72
+        preview_url:
+          type: string
+          format: uri
+          nullable: true
+        external_urls:
+          type: object
+          properties:
+            spotify:
+              type: string
+              format: uri
+
+    SpotifyArtistPage:
+      type: object
+      description: Spotify paged artist response
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/SpotifyArtist'
+        total:
+          type: integer
+        limit:
+          type: integer
+        offset:
+          type: integer
+        next:
+          type: string
+          format: uri
+          nullable: true
+        previous:
+          type: string
+          format: uri
+          nullable: true
+
+    SpotifyTrackPage:
+      type: object
+      description: Spotify paged track response
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/SpotifyTrack'
+        total:
+          type: integer
+        limit:
+          type: integer
+        offset:
+          type: integer
+        next:
+          type: string
+          format: uri
+          nullable: true
+        previous:
+          type: string
+          format: uri
+          nullable: true
+
+    # ── Spotify (Public) ───────────────────────────────────────────────────
+
+    ArtistSearchResult:
+      type: object
+      description: Paginated artist search results
+      properties:
+        artists:
+          type: object
+          properties:
+            items:
+              type: array
+              items:
+                $ref: '#/components/schemas/SpotifyArtist'
+            total:
+              type: integer
+            limit:
+              type: integer
+            offset:
+              type: integer
+            next:
+              type: string
+              format: uri
+              nullable: true
+            previous:
+              type: string
+              format: uri
+              nullable: true
+
+    TrackSearchResult:
+      type: object
+      description: Paginated track search results
+      properties:
+        tracks:
+          type: object
+          properties:
+            items:
+              type: array
+              items:
+                $ref: '#/components/schemas/SpotifyTrack'
+            total:
+              type: integer
+            limit:
+              type: integer
+            offset:
+              type: integer
+            next:
+              type: string
+              format: uri
+              nullable: true
+            previous:
+              type: string
+              format: uri
+              nullable: true
+
+    # ── Utility ────────────────────────────────────────────────────────────
+
+    MessageResponse:
+      type: object
+      properties:
+        message:
+          type: string
+
+    SuccessMessageResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+          example: true
+        message:
+          type: string

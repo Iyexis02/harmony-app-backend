@@ -4,13 +4,18 @@ import com.example.dating.models.user.common.dao.UserEntity;
 import jakarta.persistence.*;
 import lombok.AllArgsConstructor;
 import lombok.Builder;
-import lombok.Data;
+import lombok.Getter;
 import lombok.NoArgsConstructor;
+import lombok.Setter;
+import lombok.ToString;
 
 import java.time.LocalDateTime;
+import java.util.Objects;
 
 @Entity
-@Data
+@Getter
+@Setter
+@ToString
 @Table(name = "user_photos", indexes = {
         @Index(name = "idx_user_photo", columnList = "user_id,display_order")
 })
@@ -24,7 +29,8 @@ public class UserPhoto {
     @Column(name = "id", length = 36, nullable = false, updatable = false)
     private String id;
 
-    @ManyToOne
+    @ToString.Exclude
+    @ManyToOne(fetch = FetchType.LAZY)
     @JoinColumn(name = "user_id", nullable = false)
     private UserEntity user;
 
@@ -55,10 +61,25 @@ public class UserPhoto {
         if (createdAt == null) {
             createdAt = now;
         }
+        if (updatedAt == null) {
+            updatedAt = now;
+        }
     }
 
     @PreUpdate
     protected void onUpdate() {
         updatedAt = LocalDateTime.now();
+    }
+
+    @Override
+    public boolean equals(Object o) {
+        if (this == o) return true;
+        if (!(o instanceof UserPhoto other)) return false;
+        return id != null && Objects.equals(id, other.id);
+    }
+
+    @Override
+    public int hashCode() {
+        return id != null ? Objects.hashCode(id) : getClass().hashCode();
     }
 }

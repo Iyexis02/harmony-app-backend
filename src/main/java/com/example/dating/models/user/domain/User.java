@@ -31,6 +31,9 @@ public class User {
     private LocalDateTime emailVerificationExpires;
     private String passwordResetToken;
     private LocalDateTime passwordResetExpires;
+    private String emailVerificationTokenHash;
+    private String passwordResetTokenHash;
+    private Integer tokenVersion;
 
     // Spotify Integration
     private String spotifyId;
@@ -53,6 +56,10 @@ public class User {
     private LocalDate dateOfBirth;
     private Gender gender;
     private SexualOrientation sexualOrientation;
+
+    // Batch E: Account lockout
+    private Integer failedLoginAttempts;
+    private LocalDateTime lockedUntil;
 
     // Reference to underlying entity for relationships
     private UserEntity userEntity;

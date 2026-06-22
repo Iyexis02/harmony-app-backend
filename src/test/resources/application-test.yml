@@ -1,0 +1,61 @@
+# Test Configuration
+# This configuration is used when running tests with @ActiveProfiles("test")
+# Tests will use the same PostgreSQL database as development
+# but you can switch to H2 in-memory if you prefer
+
+spring:
+  # Use main database for tests (same as dev)
+  datasource:
+    url: jdbc:postgresql://127.0.0.1:5433/dating
+    username: root
+    password: secret
+    driver-class-name: org.postgresql.Driver
+
+  jpa:
+    hibernate:
+      # Use 'create-drop' to reset DB for each test, or 'update' to keep data
+      ddl-auto: update
+    show-sql: false  # Set to true to see SQL queries during tests
+    properties:
+      hibernate:
+        format_sql: true
+        default_batch_fetch_size: 50
+    database: postgresql
+    database-platform: org.hibernate.dialect.PostgreSQLDialect
+
+# Disable email sending in tests
+resend:
+  api-key: test-key
+  from: test@example.com
+
+# Test encryption key
+encryption:
+  secret:
+    key: xhnXQGxzJn/nCBAfZfPrvafxfrmAKDTZeL5r+gJ+q70=
+
+# Test JWT key
+jwt:
+  secret:
+    key: test-jwt-secret-key-for-testing-purposes-only
+  expiration:
+    hours: 24
+  token-version:
+    cache-ttl-seconds: 1  # Short TTL so BatchFTokenVersionCacheTest can verify expiry without a 30s sleep
+
+# Test Spotify credentials
+spotify:
+  client:
+    id: test-spotify-client-id
+    secret: test-spotify-client-secret
+  redirect:
+    uri: http://localhost:8080/api/v1/spotify/callback
+
+# Test Google Maps API key
+geocoding:
+  google:
+    api-key: test-google-maps-api-key
+
+# Test frontend URL
+app:
+  frontend:
+    url: http://localhost:3000

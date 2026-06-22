@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<configuration>
+
+    <!--
+        Batch H — Structured Logging with Correlation IDs
+        ==================================================
+        dev profile    : human-readable coloured console (no format change from before)
+        all other profiles : Logstash-compatible JSON — one log event per line, all MDC
+                             keys (correlationId, userId when set) emitted as top-level
+                             JSON fields, parseable by ELK / Datadog / CloudWatch Logs.
+    -->
+
+    <include resource="org/springframework/boot/logging/logback/defaults.xml"/>
+
+    <!-- ── Dev profile: coloured, human-readable console ────────────────── -->
+    <springProfile name="dev">
+        <include resource="org/springframework/boot/logging/logback/console-appender.xml"/>
+        <root level="INFO">
+            <appender-ref ref="CONSOLE"/>
+        </root>
+    </springProfile>
+
+    <!-- ── All non-dev profiles: structured JSON ─────────────────────────── -->
+    <springProfile name="!dev">
+        <appender name="JSON_CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
+            <encoder class="net.logstash.logback.encoder.LogstashEncoder">
+                <!--
+                    LogstashEncoder emits all MDC entries as top-level JSON fields by
+                    default.  The CorrelationIdFilter (Batch H) puts "correlationId"
+                    into the MDC on every request, so every log line produced during
+                    a request—including those from @Async threads decorated by
+                    MdcTaskDecorator—will carry a "correlationId" field.
+
+                    Fields emitted per event (example):
+                    {
+                      "@timestamp": "2026-03-19T12:00:00.000Z",
+                      "level":      "INFO",
+                      "logger":     "com.example.dating.services.matching.SwipeService",
+                      "thread":     "async-3",
+                      "message":    "Swipe recorded for user abc",
+                      "correlationId": "f7a1c2d3-...",
+                      "userId":        "user-uuid"   (only when set by caller)
+                    }
+                -->
+                <fieldNames>
+                    <!-- Remove @version field — not useful outside ECS stacks -->
+                    <version>[ignore]</version>
+                    <!-- Remove numeric level_value — level string is sufficient -->
+                    <levelValue>[ignore]</levelValue>
+                </fieldNames>
+            </encoder>
+        </appender>
+
+        <root level="INFO">
+            <appender-ref ref="JSON_CONSOLE"/>
+        </root>
+    </springProfile>
+
+</configuration>

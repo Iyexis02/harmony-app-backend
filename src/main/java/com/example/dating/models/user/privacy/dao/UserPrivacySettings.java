@@ -4,14 +4,21 @@ import com.example.dating.models.user.common.dao.UserEntity;
 import jakarta.persistence.*;
 import lombok.AllArgsConstructor;
 import lombok.Builder;
-import lombok.Data;
+import lombok.Getter;
 import lombok.NoArgsConstructor;
+import lombok.Setter;
+import lombok.ToString;
 
 import java.time.LocalDateTime;
+import java.util.Objects;
 
 @Entity
-@Data
-@Table(name = "user_privacy_settings")
+@Getter
+@Setter
+@ToString
+@Table(name = "user_privacy_settings", indexes = {
+    @Index(name = "idx_privacy_user", columnList = "user_id")
+})
 @Builder
 @NoArgsConstructor
 @AllArgsConstructor
@@ -22,6 +29,7 @@ public class UserPrivacySettings {
     @Column(name = "id", length = 36, nullable = false, updatable = false)
     private String id;
 
+    @ToString.Exclude
     @OneToOne
     @JoinColumn(name = "user_id", nullable = false, unique = true)
     private UserEntity user;
@@ -88,5 +96,17 @@ public class UserPrivacySettings {
     @PreUpdate
     protected void onUpdate() {
         updatedAt = LocalDateTime.now();
+    }
+
+    @Override
+    public boolean equals(Object o) {
+        if (this == o) return true;
+        if (!(o instanceof UserPrivacySettings other)) return false;
+        return id != null && Objects.equals(id, other.id);
+    }
+
+    @Override
+    public int hashCode() {
+        return id != null ? Objects.hashCode(id) : getClass().hashCode();
     }
 }
