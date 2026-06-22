@@ -1,4 +1,5 @@
 server:
+  port: ${PORT:8080}                 # Railway/Heroku inject $PORT; defaults to 8080 locally
   forward-headers-strategy: framework
   tomcat:
     threads:
@@ -23,7 +24,7 @@ spring:
     repositories:
       enabled: false   # prevent Spring Data from scanning for @RedisHash entities
   datasource:
-    url: jdbc:postgresql://127.0.0.1:5433/dating
+    url: ${DB_URL:jdbc:postgresql://127.0.0.1:5433/dating}
     username: ${DB_USERNAME:root}
     password: ${DB_PASSWORD:secret}
     driver-class-name: org.postgresql.Driver
@@ -64,7 +65,7 @@ encryption:
     key: ${ENCRYPTION_SECRET_KEY}
 
 geocoding:
-  provider: google                   # Which provider to use (google or nominatim)
+  provider: ${GEOCODING_PROVIDER:google}   # Which provider to use (google or nominatim)
 
   google:
     api-key: ${GOOGLE_MAPS_API_KEY}  # Read from environment variable

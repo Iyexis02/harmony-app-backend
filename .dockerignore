@@ -1,0 +1,21 @@
+# Build output
+target/
+
+# VCS
+.git/
+.gitignore
+
+# IDE / tooling
+.idea/
+.vscode/
+.mvn/
+.claude/
+
+# Logs and JVM crash dumps
+*.log
+hs_err_pid*.log
+replay_pid*.log
+
+# Docs (not needed in the image)
+*.md
+docs/

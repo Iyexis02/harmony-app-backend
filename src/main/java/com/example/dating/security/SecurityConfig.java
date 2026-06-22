@@ -51,6 +51,15 @@ public class SecurityConfig {
     private int tokenVersionCacheTtlSeconds;
 
     /**
+     * Allowed CORS origins, comma-separated. Defaults cover local dev ports.
+     * In production set CORS_ALLOWED_ORIGINS to the deployed frontend origin(s),
+     * e.g. "https://harmony-app.vercel.app". A wildcard "*" cannot be used here because
+     * allowCredentials=true requires explicit origins.
+     */
+    @Value("${cors.allowed-origins:http://localhost:3000,http://localhost:5173,http://localhost:4200,http://localhost:8081,http://127.0.0.1:3000,http://127.0.0.1:5173}")
+    private String allowedOrigins;
+
+    /**
      * Batch C: Fail fast if the configured HMAC key is shorter than 256 bits (32 bytes).
      * A short key weakens HMAC-SHA256 and must never reach production.
      */
@@ -111,15 +120,13 @@ public class SecurityConfig {
     public CorsConfigurationSource corsConfigurationSource() {
         CorsConfiguration configuration = new CorsConfiguration();
 
-        // Allow specific origins (update for production)
-        configuration.setAllowedOrigins(Arrays.asList(
-                "http://localhost:3000",      // React default
-                "http://localhost:5173",      // Vite default
-                "http://localhost:4200",      // Angular default
-                "http://localhost:8081",      // Alternative port
-                "http://127.0.0.1:3000",
-                "http://127.0.0.1:5173"
-        ));
+        // Allowed origins are env-driven (CORS_ALLOWED_ORIGINS). Defaults cover local dev;
+        // production overrides with the deployed frontend origin(s).
+        configuration.setAllowedOrigins(
+                Arrays.stream(allowedOrigins.split(","))
+                        .map(String::trim)
+                        .filter(s -> !s.isEmpty())
+                        .toList());
 
         // Allow all HTTP methods
         configuration.setAllowedMethods(Arrays.asList("GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"));
