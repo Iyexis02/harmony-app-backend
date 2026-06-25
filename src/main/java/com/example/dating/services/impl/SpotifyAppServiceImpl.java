@@ -2,7 +2,6 @@ package com.example.dating.services.impl;
 
 import com.example.dating.models.spotify.app.dto.ArtistSearchResult;
 import com.example.dating.models.spotify.app.dto.ClientCredentialsTokenResponse;
-import com.example.dating.models.spotify.app.dto.GenreSeedsResponse;
 import com.example.dating.models.spotify.app.dto.SpotifySearchResponse;
 import com.example.dating.models.spotify.app.dto.TrackSearchResult;
 import com.example.dating.models.user.domain.SpotifyArtist;
@@ -229,38 +228,37 @@ public class SpotifyAppServiceImpl implements SpotifyAppService {
         }
     }
 
+    /**
+     * Spotify deprecated and removed {@code GET /recommendations/available-genre-seeds}
+     * (and the whole {@code /recommendations} family); it now returns HTTP 404 for every
+     * client. Calling it therefore guaranteed a 500 on the public onboarding genre picker.
+     * We serve a static snapshot of Spotify's last-published genre-seed list instead — it is
+     * stable, needs no auth/network call, and cannot 404.
+     */
+    private static final List<String> AVAILABLE_GENRE_SEEDS = List.of(
+            "acoustic", "afrobeat", "alt-rock", "alternative", "ambient", "anime",
+            "black-metal", "bluegrass", "blues", "bossanova", "brazil", "breakbeat",
+            "british", "cantopop", "chicago-house", "children", "chill", "classical",
+            "club", "comedy", "country", "dance", "dancehall", "death-metal",
+            "deep-house", "detroit-techno", "disco", "disney", "drum-and-bass", "dub",
+            "dubstep", "edm", "electro", "electronic", "emo", "folk", "forro", "french",
+            "funk", "garage", "german", "gospel", "goth", "grindcore", "groove", "grunge",
+            "guitar", "happy", "hard-rock", "hardcore", "hardstyle", "heavy-metal",
+            "hip-hop", "holidays", "honky-tonk", "house", "idm", "indian", "indie",
+            "indie-pop", "industrial", "iranian", "j-dance", "j-idol", "j-pop", "j-rock",
+            "jazz", "k-pop", "kids", "latin", "latino", "malay", "mandopop", "metal",
+            "metal-misc", "metalcore", "minimal-techno", "movies", "mpb", "new-age",
+            "new-release", "opera", "pagode", "party", "philippines-opm", "piano", "pop",
+            "pop-film", "post-dubstep", "power-pop", "progressive-house", "psych-rock",
+            "punk", "punk-rock", "r-n-b", "rainy-day", "reggae", "reggaeton", "road-trip",
+            "rock", "rock-n-roll", "rockabilly", "romance", "sad", "salsa", "samba",
+            "sertanejo", "show-tunes", "singer-songwriter", "ska", "sleep", "songwriter",
+            "soul", "soundtracks", "spanish", "study", "summer", "swedish", "synth-pop",
+            "tango", "techno", "trance", "trip-hop", "turkish", "work-out", "world-music");
+
     @Override
     public List<String> getAvailableGenres() {
-        log.info("Fetching available genre seeds from Spotify");
-
-        try {
-            HttpHeaders headers = createAuthHeaders();
-            HttpEntity<Void> request = new HttpEntity<>(headers);
-
-            RestTemplate restTemplate = new RestTemplate();
-            ResponseEntity<GenreSeedsResponse> response = restTemplate.exchange(
-                    SPOTIFY_API_BASE_URL + "/recommendations/available-genre-seeds",
-                    HttpMethod.GET,
-                    request,
-                    GenreSeedsResponse.class
-            );
-
-            if (response.getBody() == null || response.getBody().getGenres() == null) {
-                log.warn("Received null or empty genre seeds response");
-                return Collections.emptyList();
-            }
-
-            log.info("Successfully fetched {} available genres", response.getBody().getGenres().size());
-            return response.getBody().getGenres();
-
-        } catch (HttpClientErrorException e) {
-            log.error("Failed to fetch available genres. Status: {}, Body: {}",
-                    e.getStatusCode(), e.getResponseBodyAsString());
-            throw new RuntimeException("Failed to fetch Spotify genres: " + e.getMessage(), e);
-        } catch (Exception e) {
-            log.error("Unexpected error fetching available genres", e);
-            throw new RuntimeException("Failed to fetch Spotify genres", e);
-        }
+        return AVAILABLE_GENRE_SEEDS;
     }
 
     @Override

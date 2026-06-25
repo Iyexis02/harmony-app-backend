@@ -109,27 +109,29 @@ public class OnboardingServiceImpl implements OnboardingService {
             throw new UserNotFoundException("User with id " + id + " not found");
         }
         User user = optUser.get();
+        UserEntity userEntity = user.getUserEntity();
 
-        // Delete existing photos
-        photoRepository.deleteByUserId(id);
-
-        // Create new photos
-        List<UserPhoto> photos = request.getPhotos().stream()
-                .map(photoDto -> UserPhoto.builder()
-                        .user(user.getUserEntity())
+        // Replace photos THROUGH the managed collection so Hibernate's cascade +
+        // orphanRemoval delete the old rows and insert the new ones as one consistent
+        // unit of work. The previous code deleted/inserted photos via separate
+        // repository calls (a derived deleteByUserId loads + removes the entities) and
+        // then re-saved the parent, whose photos collection still referenced the
+        // now-deleted instances — the cascade merge then threw ObjectDeletedException
+        // ("deleted instance passed to merge: [UserPhoto#<null>]"), 500-ing the request.
+        userEntity.getPhotos().clear();
+        request.getPhotos().forEach(photoDto -> userEntity.getPhotos().add(
+                UserPhoto.builder()
+                        .user(userEntity)
                         .imageUrl(photoDto.getImageUrl())
                         .displayOrder(photoDto.getDisplayOrder())
                         .isPrimary(photoDto.getIsPrimary())
                         .caption(photoDto.getCaption())
-                        .build())
-                .collect(Collectors.toList());
-
-        photoRepository.saveAll(photos);
+                        .build()));
 
         // Update registration stage ONLY if user is still in onboarding (not FINISHED)
         if (user.getRegistrationStage() != RegistrationStage.FINISHED) {
             user.setRegistrationStage(RegistrationStage.PHOTOS);
-            user.getUserEntity().setRegistrationStage(RegistrationStage.PHOTOS);
+            userEntity.setRegistrationStage(RegistrationStage.PHOTOS);
         }
 
         return userMapper.toDtoResponse(userMapper.toDomain(userJpaRepository.save(userMapper.toEntity(user))));
