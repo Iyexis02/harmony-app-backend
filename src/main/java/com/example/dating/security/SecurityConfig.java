@@ -4,6 +4,7 @@ import com.example.dating.repositories.UserJpaRepository;
 import com.example.dating.models.user.common.dao.UserEntity;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
+import org.springframework.http.HttpMethod;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.security.config.Customizer;
 import org.springframework.security.config.annotation.method.configuration.EnableMethodSecurity;
@@ -51,12 +52,16 @@ public class SecurityConfig {
     private int tokenVersionCacheTtlSeconds;
 
     /**
-     * Allowed CORS origins, comma-separated. Defaults cover local dev ports.
-     * In production set CORS_ALLOWED_ORIGINS to the deployed frontend origin(s),
-     * e.g. "https://harmony-app.vercel.app". A wildcard "*" cannot be used here because
-     * allowCredentials=true requires explicit origins.
+     * Allowed CORS origin patterns, comma-separated. Defaults cover local dev ports and the
+     * deployed Vercel frontend (production + preview deploys). Override with CORS_ALLOWED_ORIGINS
+     * to add/replace origins for other environments.
+     *
+     * These are applied via {@link CorsConfiguration#setAllowedOriginPatterns} (not the plain
+     * allowed-origins list), so entries may contain "*" wildcards — e.g. the Vercel preview
+     * pattern "https://harmony-app-frontend-*.vercel.app" — while still working with
+     * allowCredentials=true. The browser is sent back the exact requesting origin, never "*".
      */
-    @Value("${cors.allowed-origins:http://localhost:3000,http://localhost:5173,http://localhost:4200,http://localhost:8081,http://127.0.0.1:3000,http://127.0.0.1:5173}")
+    @Value("${cors.allowed-origins:http://localhost:3000,http://localhost:5173,http://localhost:4200,http://localhost:8081,http://127.0.0.1:3000,http://127.0.0.1:5173,https://harmony-app-frontend.vercel.app,https://harmony-app-frontend-*.vercel.app}")
     private String allowedOrigins;
 
     /**
@@ -78,6 +83,10 @@ public class SecurityConfig {
                 .cors(Customizer.withDefaults())  // Enable CORS
                 .csrf(AbstractHttpConfigurer::disable)
                 .authorizeHttpRequests(auth -> auth
+                        // CORS preflight: never authenticate OPTIONS. http.cors() already short-circuits
+                        // preflight via the CorsFilter, but permitting OPTIONS explicitly guards against
+                        // any future filter ordering change blocking the preflight before CORS runs.
+                        .requestMatchers(HttpMethod.OPTIONS, "/**").permitAll()
                         // connect-spotify is an authenticated action — must precede the auth wildcard
                         .requestMatchers("/api/v1/auth/connect-spotify").authenticated()
                         .requestMatchers("/api/v1/auth/**").permitAll()
@@ -120,9 +129,11 @@ public class SecurityConfig {
     public CorsConfigurationSource corsConfigurationSource() {
         CorsConfiguration configuration = new CorsConfiguration();
 
-        // Allowed origins are env-driven (CORS_ALLOWED_ORIGINS). Defaults cover local dev;
-        // production overrides with the deployed frontend origin(s).
-        configuration.setAllowedOrigins(
+        // Allowed origins are env-driven (CORS_ALLOWED_ORIGINS). Defaults cover local dev and
+        // the deployed Vercel frontend (production + preview deploys). Patterns are used (not the
+        // plain allowed-origins list) so wildcard entries like the Vercel preview pattern work
+        // even with allowCredentials=true — Spring echoes back the exact requesting origin.
+        configuration.setAllowedOriginPatterns(
                 Arrays.stream(allowedOrigins.split(","))
                         .map(String::trim)
                         .filter(s -> !s.isEmpty())
